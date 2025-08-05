@@ -1,0 +1,28 @@
+services:
+  vst-host:
+    build:
+      context: .
+      target: dev
+    image: vst-host:dev
+    restart: on-failure
+    networks:
+      - radx
+    env_file:
+      - ../.env
+    environment:
+      DOTNET_USE_POLLING_FILE_WATCHER: 1
+      DOTNET_WATCH_SUPPRESS_LAUNCH: 1
+      ASPNETCORE_ENVIRONMENT: Development
+    ports:
+      - "${ASPNETCORE_PORT}:5001"
+    volumes:
+      - ../app:/app
+      - ${VST3_PLUGINS}:/plugins
+      - ${VST3_SDK}:/vst3sdk:ro
+      - /app/obj
+      - /app/bin
+
+networks:
+  radx:
+    name: radx
+    external: true
