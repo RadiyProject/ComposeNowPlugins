@@ -1,6 +1,5 @@
 # ============= Base: .NET SDK 9.0 =============
 FROM mcr.microsoft.com/dotnet/sdk:9.0.303 AS base
-WORKDIR /app
 
 # ============= Build stage для headless VST3 =============
 FROM base AS build

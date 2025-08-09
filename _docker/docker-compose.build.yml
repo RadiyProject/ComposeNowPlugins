@@ -1,0 +1,11 @@
+services:
+  vst-host-build:
+    build:
+      context: .
+      target: dev
+    image: vst-host:build
+    env_file:
+      - ../.env
+    volumes:
+      - ${VST3_PLUGINS}:/plugins
+      - ${VST3_SDK}:/vst3sdk:ro
