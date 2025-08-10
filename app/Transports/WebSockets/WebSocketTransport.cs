@@ -2,8 +2,11 @@ using System.Net.WebSockets;
 
 namespace ComposeNowPlugins.Transports.WebSockets;
 
-public class WebSocketTransport : IRealtimeTransport
+public class WebSocketTransport(IRuntimeSessionFactory factory, ILogger<WebSocketTransport> log) : IRealtimeTransport
 {
+    private readonly IRuntimeSessionFactory _factory = factory;
+    private readonly ILogger<WebSocketTransport> _log = log;
+
     public async Task ConnectAsync(HttpContext context, CancellationToken cancellationToken)
     {
         if (!context.WebSockets.IsWebSocketRequest)
@@ -15,13 +18,14 @@ public class WebSocketTransport : IRealtimeTransport
         using var webSocket = await context.WebSockets.AcceptWebSocketAsync();
         try
         {
-            // передаём токен отмены от Kestrel, чтобы сервер аккуратно завершался при разрыве соединения
-            await Echo(webSocket, context.RequestAborted);
+            var channel = new WebSocketChannel(webSocket);
+            var session = _factory.Create(context);   // echo/audio/…
+            await session.RunAsync(channel, cancellationToken);
         }
         catch (WebSocketException ex)
         {
             // клиент мог закрыться без рукопожатия — не считаем это аварией
-            Console.WriteLine($"WS warning: {ex.Message}");
+            _log.LogWarning(ex, "WS transport error");
         }
         // using сам закроет, но если вдруг мы всё ещё открыты — отправим финальный close
         finally
@@ -30,44 +34,6 @@ public class WebSocketTransport : IRealtimeTransport
             {
                 try { await webSocket.CloseAsync(WebSocketCloseStatus.NormalClosure, "bye", cancellationToken); }
                 catch { /* ignore */ }
-            }
-        }
-    }
-    
-    private static async Task Echo(WebSocket webSocket, CancellationToken ct)
-    {
-        var buffer = new byte[4 * 1024];
-
-        while (!ct.IsCancellationRequested)
-        {
-            WebSocketReceiveResult receiveResult;
-            try
-            {
-                receiveResult = await webSocket.ReceiveAsync(new ArraySegment<byte>(buffer), ct);
-            }
-            catch (OperationCanceledException)
-            {
-                break; // запрос отменён (соединение порвали)
-            }
-            catch (WebSocketException)
-            {
-                break; // клиент закрылся/ошибка транспорта — выходим без падения
-            }
-
-            if (receiveResult.CloseStatus.HasValue)
-            {
-                // пришёл Close от клиента — отвечаем Close и выходим
-                await webSocket.CloseAsync(receiveResult.CloseStatus.Value, receiveResult.CloseStatusDescription, CancellationToken.None);
-                break;
-            }
-
-            if (receiveResult.Count > 0)
-            {
-                await webSocket.SendAsync(
-                    new ArraySegment<byte>(buffer, 0, receiveResult.Count),
-                    receiveResult.MessageType,
-                    receiveResult.EndOfMessage,
-                    CancellationToken.None);
             }
         }
     }

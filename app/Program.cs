@@ -6,8 +6,12 @@ var builder = WebApplication.CreateBuilder(args);
 // Add services to the container.
 builder.Services.AddControllers();
 
-builder.Services.AddSingleton<WebSocketTransport>();
-builder.Services.AddSingleton<IRealtimeTransport>(serviceProvider =>//Decorator (Scrutor)
+builder.Services.AddScoped<IRuntimeSessionFactory, RuntimeSessionFactory>();
+builder.Services.AddScoped<EchoRuntimeSession>();
+builder.Services.AddScoped<AudioRuntimeSession>();
+
+builder.Services.AddScoped<WebSocketTransport>();
+builder.Services.AddScoped<IRealtimeTransport>(serviceProvider =>//Decorator (Scrutor)
     new LoggingTransport(
         serviceProvider.GetRequiredService<WebSocketTransport>(),
         serviceProvider.GetRequiredService<ILogger<LoggingTransport>>()
