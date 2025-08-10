@@ -1,7 +1,17 @@
+using ComposeNowPlugins.Transports;
+using ComposeNowPlugins.Transports.WebSockets;
+
 var builder = WebApplication.CreateBuilder(args);
 
 // Add services to the container.
 builder.Services.AddControllers();
+
+builder.Services.AddSingleton<WebSocketTransport>();
+builder.Services.AddSingleton<IRealtimeTransport>(serviceProvider =>//Decorator (Scrutor)
+    new LoggingTransport(
+        serviceProvider.GetRequiredService<WebSocketTransport>(),
+        serviceProvider.GetRequiredService<ILogger<LoggingTransport>>()
+    ));
 
 var app = builder.Build();
 
