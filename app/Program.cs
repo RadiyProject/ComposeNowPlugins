@@ -1,10 +1,13 @@
 using ComposeNowPlugins.Transports;
 using ComposeNowPlugins.Transports.WebSockets;
+using ComposeNowPlugins.Wrappers;
 
 var builder = WebApplication.CreateBuilder(args);
 
 // Add services to the container.
 builder.Services.AddControllers();
+
+builder.Services.AddSingleton<VstEngine>();
 
 builder.Services.AddScoped<IRuntimeSessionFactory, RuntimeSessionFactory>();
 builder.Services.AddScoped<EchoRuntimeSession>();

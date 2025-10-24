@@ -1,7 +1,7 @@
 PLUGIN ?= none
 
 up:
-	cd _docker && docker compose --env-file ../.env up -d
+	cd _docker && docker compose --env-file ../.env up -d --no-build
 
 down:
 	cd _docker && docker compose --env-file ../.env down
@@ -14,6 +14,6 @@ shell:
 	cd _docker && docker compose --env-file ../.env exec vst-host bash
 
 build:
-	cd _docker && docker compose --env-file ../.env -f docker-compose.build.yml up -d --build
-	cd _docker && docker compose exec vst-host-build cd /plugins/${PLUGIN}/build && cmake .. && make
+#--build
+	cd _docker && docker compose --env-file ../.env -f docker-compose.build.yml up --no-build --abort-on-container-exit
 	cd _docker && docker compose --env-file ../.env -f docker-compose.build.yml down

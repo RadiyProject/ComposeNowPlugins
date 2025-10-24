@@ -17,7 +17,8 @@ services:
       - "${ASPNETCORE_PORT}:5001"
     volumes:
       - ../app:/app
-      - ${VST3_PLUGINS}:/plugins
+      - ../vst_builds:/plugins:ro
+      - ../logs:/logs
       - /app/obj
       - /app/bin
 
