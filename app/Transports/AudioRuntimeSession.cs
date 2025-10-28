@@ -1,5 +1,4 @@
 using System.Diagnostics;
-using System.Text.Json;
 using ComposeNowPlugins.Wrappers;
 
 namespace ComposeNowPlugins.Transports;
@@ -8,6 +7,7 @@ public sealed class AudioRuntimeSession : IRuntimeSession
 {
     private readonly ILogger<AudioRuntimeSession> _log;
     private readonly VstEngine _vst;
+    private readonly IConfiguration _cfg;
 
     private readonly int _sampleRate;
     private readonly int _channels = 2;
@@ -22,33 +22,47 @@ public sealed class AudioRuntimeSession : IRuntimeSession
     {
         _log = log;
         _vst = vst;
+        _cfg = cfg;
 
         _sampleRate = vst.SampleRate;
         _blockSize = vst.BlockSize;
 
-        _delayMs = int.Parse(cfg["AUDIO_DEV_DELAY_MS"] ?? "0");
+        _delayMs = /*int.Parse(cfg["AUDIO_DEV_DELAY_MS"] ?? "0")*/0;
         _delaySamples = (int)(_sampleRate * (_delayMs / 1000.0));
     }
 
     public async Task RunAsync(IRuntimeChannel ch, CancellationToken ct)
     {
-        // hello для клиента
-        var hello = JsonSerializer.SerializeToUtf8Bytes(new {
-            type = "hello",
-            sample_rate = _sampleRate,
-            channels = _channels,
-            block = _blockSize,
-            encoding = "AUD0/float32le"
-        });
-        await ch.SendAsync(hello, "application/json", true, ct);
+        // 0) --- HANDSHAKE: ждём hello от клиента (ТЕКСТ) ---
+        int sampleRate = _sampleRate, channels = _channels, blockSize = _blockSize;
+        var mode = "realtime";
+
+        // 1) фьючерс, который выполнится при получении hello
+        var helloTcs = new TaskCompletionSource<(int sampleRate, int blockSize, int channels, string mode)>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
 
         // 1) Параллельное чтение входа (ноты/параметры)
         var reader = Task.Run(async () =>
         {
             await foreach (var msg in ch.ReadAllAsync(ct))
             {
-                if (msg.ContentType != "text/plain") continue;
                 var s = System.Text.Encoding.UTF8.GetString(msg.Payload.Span).Trim();
+
+                if (s.StartsWith("hello ", StringComparison.OrdinalIgnoreCase))
+                {
+                    var p = s.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+                    if (p.Length >= 5)
+                    {
+                        int _sr = int.Parse(p[1]);
+                        int _bs = int.Parse(p[2]);
+                        int _ch = int.Parse(p[3]);
+                        string _mode = p[4];
+                        // выставляем результат hello — только один раз
+                        helloTcs.TrySetResult((_sr, _bs, _ch, _mode));
+                    }
+                    continue;
+                }
+                if (msg.ContentType != "text/plain") continue;
 
                 if (s.StartsWith("note on ", StringComparison.OrdinalIgnoreCase))
                 {
@@ -77,26 +91,60 @@ public sealed class AudioRuntimeSession : IRuntimeSession
         }, ct);
 
         // 2) Стрим аудио с тактированием по blockSize/sampleRate
-        var period = TimeSpan.FromSeconds((double)_blockSize / _sampleRate);
+        var period = TimeSpan.FromSeconds((double)blockSize / sampleRate);
         var next = Stopwatch.GetTimestamp();
         var freq = (double)Stopwatch.Frequency;
 
         ulong seq = 0, ts = 0;
 
+        // 3) ждём hello с таймаутом (чтобы не зависнуть, если клиент его не шлёт)
+        try
+        {
+            using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            cts.CancelAfter(TimeSpan.FromSeconds(2)); // таймаут хэндшейка (на вкус)
+            var res = await helloTcs.Task.WaitAsync(cts.Token);
+            sampleRate = res.sampleRate;
+            blockSize = res.blockSize;
+            channels = res.channels;
+            mode = res.mode;
+        }
+        catch (OperationCanceledException)
+        {
+            // hello не пришёл вовремя — остаёмся на дефолтах (_sampleRate/_blockSize/_channels, realtime)
+        }
+
+        var offline = string.Equals(mode, "offline", StringComparison.OrdinalIgnoreCase);
+
+        var ok = _vst.Reconfigure(sampleRate, blockSize, channels, offline);
+        if (!ok)
+        {
+            _log.LogWarning("VST reconfigure failed: sr={sr}, bs={bs}, ch={ch}, offline={offline}",
+                sampleRate, blockSize, channels, offline);
+            // опционально: откатиться к дефолтам или завершить сессию
+            // return; // если хочешь оборвать поток
+        }
+
+        // обновляем тайминг под новые параметры
+        period = TimeSpan.FromSeconds((double)blockSize / sampleRate);
+        next   = Stopwatch.GetTimestamp();
+
         try
         {
             while (!ct.IsCancellationRequested)
             {
-                var audio = _vst.Process(); // interleaved float32 (_blockSize * _channels)
-                var frame = Aud0.Pack(seq, ts, _sampleRate, _channels, audio);
+                var audio = _vst.Process(); // interleaved float32 (blockSize * channels)
+                var frame = Aud0.Pack(seq, ts, sampleRate, channels, audio);
                 await ch.SendAsync(frame, "application/octet-stream", true, ct);
 
                 seq++;
-                ts += (ulong)_blockSize;
+                ts += (ulong)blockSize;
 
-                next += (long)(period.TotalSeconds * freq);
-                var delay = TimeSpan.FromSeconds((next - Stopwatch.GetTimestamp()) / freq);
-                if (delay > TimeSpan.Zero) await Task.Delay(delay, ct);
+                if (!offline)
+                {
+                    next += (long)(period.TotalSeconds * freq);
+                    var delay = TimeSpan.FromSeconds((next - Stopwatch.GetTimestamp()) / freq);
+                    if (delay > TimeSpan.Zero) await Task.Delay(delay, ct);
+                }
             }
         }
         finally

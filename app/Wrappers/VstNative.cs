@@ -1,9 +1,10 @@
 using System.Reflection;
+using System.Runtime.InteropServices;
+using System.Runtime.CompilerServices;
+
 namespace ComposeNowPlugins.Wrappers;
 
-using System.Runtime.InteropServices;
-
-internal static class VstNative
+internal static partial class VstNative
 {
     private const string libBase = "VstHostCapi";
 
@@ -41,24 +42,38 @@ internal static class VstNative
         return handle;
     }
 
-    [DllImport(libBase, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi, ExactSpelling = true)]
-    public static extern IntPtr VstCreate(string pluginPath, double sampleRate, int blockSize, int channels);
+    [LibraryImport(libBase, StringMarshalling = StringMarshalling.Utf8)]
+    [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
+    public static partial IntPtr VstCreate(string pluginPath, double sampleRate, int blockSize, int channels);
 
-    [DllImport(libBase, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi, ExactSpelling = true)]
-    public static extern void VstDestroy(IntPtr h);
+    [LibraryImport(libBase)]
+    [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
+    public static partial void VstDestroy(IntPtr h);
 
-    [DllImport(libBase, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi, ExactSpelling = true)]
-    public static extern void VstSetParam(IntPtr h, uint id, float norm);
+    [LibraryImport(libBase)]
+    [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
+    public static partial void VstSetParam(IntPtr h, uint id, float norm);
 
-    [DllImport(libBase, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi, ExactSpelling = true)]
-    public static extern void VstNoteOn(IntPtr h, int note, float vel);
+    [LibraryImport(libBase)]
+    [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
+    public static partial void VstNoteOn(IntPtr h, int note, float vel);
 
-    [DllImport(libBase, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi, ExactSpelling = true)]
-    public static extern void VstNoteOff(IntPtr h, int note);
+    [LibraryImport(libBase)]
+    [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
+    public static partial void VstNoteOff(IntPtr h, int note);
 
-    [DllImport(libBase, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi, ExactSpelling = true)]
-    public static extern void VstSetLatency(IntPtr h, uint samples);
+    [LibraryImport(libBase)]
+    [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
+    public static partial void VstSetLatency(IntPtr h, uint samples);
 
-    [DllImport(libBase, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi, ExactSpelling = true)]
-    public static extern int VstProcess(IntPtr h, float[] outInterleaved, int frames);
+    [LibraryImport(libBase)]
+    [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
+    [return: MarshalAs(UnmanagedType.I4)]
+    public static partial int VstProcess(IntPtr h, [Out][MarshalAs(UnmanagedType.LPArray, SizeParamIndex = 2)] float[] outInterleaved, int frames);
+
+    [LibraryImport(libBase)]
+    [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
+    [return: MarshalAs(UnmanagedType.I1)]
+    public static partial bool VstReconfigure(
+        IntPtr h, double sampleRate, int blockSize, int channels, int processMode /*0=rt,1=offline*/);
 }

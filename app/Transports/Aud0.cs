@@ -12,7 +12,7 @@ public static class Aud0
         int samples = interleaved.Length; 
         int frames = samples / channels;
 
-        const int HeaderSize = 4 + 1 + 1 + 2 + 8 + 8 + 4 + 4; // = 32
+        const int HeaderSize = 32; // = 4 + 1 + 1 + 2 + 8 + 8 + 4 + 4
         var payloadBytes = samples * sizeof(float);
         var buf = new byte[HeaderSize + payloadBytes];
 

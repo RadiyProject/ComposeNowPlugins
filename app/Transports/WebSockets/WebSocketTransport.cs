@@ -20,7 +20,11 @@ public class WebSocketTransport(IRuntimeSessionFactory factory, ILogger<WebSocke
         {
             var channel = new WebSocketChannel(webSocket);
             var session = _factory.Create(context);   // echo/audio/…
-            await session.RunAsync(channel, cancellationToken);
+            await session.RunAsync(channel, context.RequestAborted);
+        }
+        catch (OperationCanceledException)
+        {
+            _log.LogInformation("WS session cancelled."); // не считаем ошибкой
         }
         catch (WebSocketException ex)
         {
