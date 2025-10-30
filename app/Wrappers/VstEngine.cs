@@ -70,6 +70,19 @@ public sealed class VstEngine : IAsyncDisposable
         var n = VstNative.VstProcess(_host, _tmp, _blockSize);
         return new ReadOnlyMemory<float>(_tmp, 0, n * _channels);
     }
+    public ReadOnlyMemory<float> Process(int frames)
+    {
+        if (frames <= 0) return ReadOnlyMemory<float>.Empty;
+
+        // гарантируем буфер нужного размера
+        int need = frames * _channels;
+        if (_tmp.Length < need)
+            _tmp = new float[need];
+
+        var n = VstNative.VstProcess(_host, _tmp, frames);
+        // VstProcess возвращает фактически отрисованные фреймы (<= frames)
+        return new ReadOnlyMemory<float>(_tmp, 0, n * _channels);
+    }
 
     public ValueTask DisposeAsync()
     {
