@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Diagnostics;
 using ComposeNowPlugins.Wrappers;
 
@@ -17,6 +18,32 @@ public sealed class AudioRuntimeSession : IRuntimeSession
     private readonly int _delayMs;
     private readonly int _delaySamples;
     private readonly Queue<float> _delayFifo = new();
+
+    record Evt(int Type, int Pitch, float Vel, int Offs); // Type: 1=on, 2=off
+    readonly ConcurrentDictionary<ulong, List<Evt>> _eventsBySeq = new();
+    static bool TryParseEvt0(ReadOnlySpan<byte> span, out ulong seq, out List<Evt> evts)
+    {
+        evts = new();
+        seq = 0;
+        if (span.Length < 16) return false;
+        if (!(span[0]=='E' && span[1]=='V' && span[2]=='T' && span[3]=='0')) return false;
+        seq = System.Buffers.Binary.BinaryPrimitives.ReadUInt64LittleEndian(span.Slice(4,8));
+        uint cnt = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(span.Slice(12,4));
+        int pos = 16;
+        const int entry = 12;
+        if (span.Length < pos + entry * cnt) return false;
+
+        for (uint i=0; i<cnt; i++, pos+=entry) {
+            ushort type = System.Buffers.Binary.BinaryPrimitives.ReadUInt16LittleEndian(span.Slice(pos+0,2));
+            ushort pitch= System.Buffers.Binary.BinaryPrimitives.ReadUInt16LittleEndian(span.Slice(pos+2,2));
+            float  vel  = BitConverter.Int32BitsToSingle(System.Buffers.Binary.BinaryPrimitives.ReadInt32LittleEndian(span.Slice(pos+4,4)));
+            ushort offs = System.Buffers.Binary.BinaryPrimitives.ReadUInt16LittleEndian(span.Slice(pos+8,2));
+            evts.Add(new Evt(type, pitch, vel, offs));
+        }
+        // детерминистский порядок: сначала меньший offs, при равенстве — noteOff(2) перед noteOn(1)
+        evts.Sort((a,b) => a.Offs!=b.Offs ? a.Offs.CompareTo(b.Offs) : a.Type.CompareTo(b.Type));
+        return true;
+    }
 
     public AudioRuntimeSession(ILogger<AudioRuntimeSession> log, VstEngine vst, IConfiguration cfg)
     {
@@ -105,6 +132,17 @@ public sealed class AudioRuntimeSession : IRuntimeSession
                     continue;
                 }
 
+                if (span.Length >= 4 && span[0]=='E' && span[1]=='V' && span[2]=='T' && span[3]=='0')
+                {
+                    if (TryParseEvt0(span, out var sseq, out var list))
+                    {
+                        _eventsBySeq.AddOrUpdate(sseq,
+                            _ => list,
+                            (_, old) => { old.AddRange(list); old.Sort((a,b) => a.Offs!=b.Offs ? a.Offs.CompareTo(b.Offs) : a.Type.CompareTo(b.Type)); return old; });
+                    }
+                    continue;
+                }
+
                 if (s.Equals("panic", StringComparison.OrdinalIgnoreCase))
                 {
                     // мгновенно гасим все голоса
@@ -165,14 +203,75 @@ public sealed class AudioRuntimeSession : IRuntimeSession
                         await creditSignal.WaitAsync(ct);
                 }
 
-                byte[]? frame;
-                
-                // нет событий — обычный сплошной Process()
-                var audio = _vst.Process();
-                frame = Aud0.Pack(seq, ts, sampleRate, channels, audio);
+                float[]? outBuf = null;
 
-                //var frame = Aud0.Pack(seq, ts, sampleRate, channels, audio);
-                await ch.SendAsync(frame, "application/octet-stream", true, ct);
+                // достаём события для текущего seq (если есть)
+                List<Evt>? evtsForBlock = null;
+
+                if (offline)
+                {
+                    // ждём до 50 мс прихода EVT0 для этого seq (обычно прилетает мгновенно)
+                    var t0 = Stopwatch.GetTimestamp();
+                    var frequency = (double)Stopwatch.Frequency;
+                    while (!_eventsBySeq.TryRemove(seq, out evtsForBlock))
+                    {
+                        var elapsed = (Stopwatch.GetTimestamp() - t0) / frequency;
+                        if (elapsed > 0.050) break; // таймаут
+                        await Task.Delay(0, ct);
+                    }
+                }
+                else
+                {
+                    _eventsBySeq.TryRemove(seq, out evtsForBlock);
+                }
+
+                if (evtsForBlock is null || evtsForBlock.Count == 0)
+                {
+                    // как раньше — один заход
+                    var audio = _vst.Process(blockSize); // frames == _vst.BlockSize
+                    // упаковка...
+                    var frame = Aud0.Pack(seq, ts, sampleRate, channels, audio);
+                    await ch.SendAsync(frame, "application/octet-stream", true, ct);
+                }
+                else
+                {
+                    int block = _vst.BlockSize;
+                    // Гарантируем размер под весь блок и очищаем на всякий случай
+                    if (outBuf is null || outBuf.Length != block * channels)
+                        outBuf = new float[block * channels];
+                    else
+                        Array.Clear(outBuf, 0, outBuf.Length);
+
+                    int cursor = 0;
+                    foreach (var ev in evtsForBlock)
+                    {
+                        int offs = Math.Clamp(ev.Offs, 0, block-1);
+                        int len = Math.Max(0, offs - cursor);
+                        if (len > 0)
+                        {
+                            var part = _vst.Process(len);
+                            // копируем part в outBuf на позицию cursor
+                            var partArr = part.ToArray(); // если VstProcess не гарантирует фиксированный буфер
+                            Buffer.BlockCopy(partArr, 0, outBuf, cursor * channels * sizeof(float), partArr.Length * sizeof(float));
+                            cursor += len;
+                        }
+
+                        // применяем событие на точном сэмпле
+                        if (ev.Type == 2) _vst.NoteOff(ev.Pitch);     // OFF раньше ON при одинаковом offs
+                        else              _vst.NoteOn(ev.Pitch, ev.Vel);
+                    }
+                    // дорисовываем хвост блока
+                    if (cursor < block)
+                    {
+                        var tail = _vst.Process(block - cursor);
+                        var tailArr = tail.ToArray();
+                        Buffer.BlockCopy(tailArr, 0, outBuf, cursor * channels * sizeof(float), tailArr.Length * sizeof(float));
+                    }
+
+                    // пакуем готовый interleaved буфер
+                    var frame = Aud0.Pack(seq, ts, sampleRate, channels, outBuf);
+                    await ch.SendAsync(frame, "application/octet-stream", true, ct);
+                }
 
                 if (offline)
                 {
