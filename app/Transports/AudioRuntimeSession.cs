@@ -1,4 +1,3 @@
-using System.Collections.Concurrent;
 using System.Diagnostics;
 using ComposeNowPlugins.Wrappers;
 
@@ -18,8 +17,6 @@ public sealed class AudioRuntimeSession : IRuntimeSession
     private readonly int _delayMs;
     private readonly int _delaySamples;
     private readonly Queue<float> _delayFifo = new();
-
-    private readonly ConcurrentDictionary<ulong, List<(ushort type, ushort pitch, float vel, ushort offs)>> _evtBySeq = new();
 
     public AudioRuntimeSession(ILogger<AudioRuntimeSession> log, VstEngine vst, IConfiguration cfg)
     {
@@ -108,24 +105,12 @@ public sealed class AudioRuntimeSession : IRuntimeSession
                     continue;
                 }
 
-                if (span.Length >= 16 && span[0] == 'E' && span[1] == 'V' && span[2] == 'T' && span[3] == '0')
+                if (s.Equals("panic", StringComparison.OrdinalIgnoreCase))
                 {
-                    ulong seq = System.Buffers.Binary.BinaryPrimitives.ReadUInt64LittleEndian(span.Slice(4, 8));
-                    uint count = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(span.Slice(12, 4));
-                    var list = new List<(ushort, ushort, float, ushort)>((int)count);
-
-                    var payload = span.Slice(16);
-                    int off = 0;
-                    for (int i = 0; i < count; i++)
-                    {
-                        ushort type = System.Buffers.Binary.BinaryPrimitives.ReadUInt16LittleEndian(payload.Slice(off)); off += 2;
-                        ushort pitch = System.Buffers.Binary.BinaryPrimitives.ReadUInt16LittleEndian(payload.Slice(off)); off += 2;
-                        float vel = BitConverter.ToSingle(payload.Slice(off, 4)); off += 4;
-                        ushort so = System.Buffers.Binary.BinaryPrimitives.ReadUInt16LittleEndian(payload.Slice(off)); off += 2;
-                        off += 2; // pad
-                        list.Add((type, pitch, vel, so));
-                    }
-                    _evtBySeq[seq] = list;
+                    // мгновенно гасим все голоса
+                    for (int n = 0; n < 128; n++) _vst.NoteOff(n);
+                    // если у синта есть «сустейн» — принудительно отпустить (если реализовано через параметр/CC64)
+                    // _vst.SetParam(CC64ParamId, 0f);
                     continue;
                 }
             }
@@ -181,46 +166,10 @@ public sealed class AudioRuntimeSession : IRuntimeSession
                 }
 
                 byte[]? frame;
-
-                var events = _evtBySeq.TryGetValue(seq, out var lst)
-                    ? lst.OrderBy(e => e.offs)
-                        .ThenBy(e => e.type == 2 ? 0 : 1) // Off (2) перед On (1)
-                        .ToList()
-                    : null;
-                if (events != null && events.Count > 0)
-                {
-                    int cursor = 0;
-                    var outMix = new float[blockSize * channels];
-                    // рендерим по кускам: [cursor .. ev.offs), применяем событие, дальше...
-                    foreach (var (type, pitch, vel, offs) in events)
-                    {
-                        int len = Math.Clamp(offs - cursor, 0, blockSize - cursor);
-                        if (len > 0)
-                        {
-                            var part = _vst.Process(len);
-                            MixInto(outMix, part, cursor, channels);
-                            cursor += len;
-                        }
-                        if (type == 1) _vst.NoteOn(pitch, vel);
-                        else if (type == 2) _vst.NoteOff(pitch);
-                    }
-                    // хвост до конца блока
-                    if (cursor < blockSize)
-                    {
-                        var tail = _vst.Process(blockSize - cursor);
-                        MixInto(outMix, tail, cursor, channels);
-                    }
-                    // теперь упаковываем outMix
-                    frame = Aud0.Pack(seq, ts, sampleRate, channels, outMix);
-
-                    _evtBySeq.TryRemove(seq, out _);
-                }
-                else
-                {
-                    // нет событий — обычный сплошной Process()
-                    var audio = _vst.Process();
-                    frame = Aud0.Pack(seq, ts, sampleRate, channels, audio);
-                }
+                
+                // нет событий — обычный сплошной Process()
+                var audio = _vst.Process();
+                frame = Aud0.Pack(seq, ts, sampleRate, channels, audio);
 
                 //var frame = Aud0.Pack(seq, ts, sampleRate, channels, audio);
                 await ch.SendAsync(frame, "application/octet-stream", true, ct);
@@ -245,16 +194,12 @@ public sealed class AudioRuntimeSession : IRuntimeSession
         finally
         {
             try { await reader; } catch { /* ignore */ }
+            try
+            {
+                for (int n = 0; n < 128; n++) _vst.NoteOff(n);
+                // короткий «дорасчёт» хвоста (если нужно) или просто ничего не шлём
+            }
+            catch { }
         }
-    }
-    
-    private static void MixInto(float[] dst, ReadOnlyMemory<float> src, int dstFrameOffset, int channels)
-    {
-        var s = src.Span;
-        int frames = s.Length / channels;
-        int dstIndex = dstFrameOffset * channels;
-        // простое суммирование (если планируешь громкость держать, можно заменить на копирование)
-        for (int i = 0; i < frames * channels; i++)
-            dst[dstIndex + i] = s[i];
     }
 }
