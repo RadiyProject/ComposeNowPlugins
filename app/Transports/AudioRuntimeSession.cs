@@ -1,3 +1,4 @@
+using System.Buffers.Binary;
 using System.Collections.Concurrent;
 using System.Diagnostics;
 using ComposeNowPlugins.Wrappers;
@@ -20,30 +21,45 @@ public sealed class AudioRuntimeSession : IRuntimeSession
     private readonly Queue<float> _delayFifo = new();
 
     record Evt(int Type, int Pitch, float Vel, int Offs); // Type: 1=on, 2=off
-    readonly ConcurrentDictionary<ulong, List<Evt>> _eventsBySeq = new();
-    static bool TryParseEvt0(ReadOnlySpan<byte> span, out ulong seq, out List<Evt> evts)
+    record EvtBlock(int BlockFrames, List<Evt> Events);
+    readonly ConcurrentDictionary<ulong, EvtBlock> _eventsBySeq = new();
+
+    static bool TryParseEvt1(ReadOnlySpan<byte> span, out ulong seq, out int blockFrames, out List<Evt> evts)
     {
-        evts = new();
+        evts = [];
         seq = 0;
-        if (span.Length < 16) return false;
-        if (!(span[0]=='E' && span[1]=='V' && span[2]=='T' && span[3]=='0')) return false;
-        seq = System.Buffers.Binary.BinaryPrimitives.ReadUInt64LittleEndian(span.Slice(4,8));
-        uint cnt = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(span.Slice(12,4));
-        int pos = 16;
+        blockFrames = 0;
+
+        // min: 4(magic)+8(seq)+4(blockFrames)+4(cnt) = 20
+        if (span.Length < 20) return false;
+        if (!(span[0]=='E' && span[1]=='V' && span[2]=='T' && span[3]=='1')) return false;
+
+        seq         = BinaryPrimitives.ReadUInt64LittleEndian(span.Slice(4, 8));
+        blockFrames = BinaryPrimitives.ReadInt32LittleEndian(span.Slice(12, 4));
+        uint cnt    = BinaryPrimitives.ReadUInt32LittleEndian(span.Slice(16, 4));
+
+        if (blockFrames <= 0) return false;
+
+        int pos = 20;
         const int entry = 12;
         if (span.Length < pos + entry * cnt) return false;
 
-        for (uint i=0; i<cnt; i++, pos+=entry) {
-            ushort type = System.Buffers.Binary.BinaryPrimitives.ReadUInt16LittleEndian(span.Slice(pos+0,2));
-            ushort pitch= System.Buffers.Binary.BinaryPrimitives.ReadUInt16LittleEndian(span.Slice(pos+2,2));
-            float  vel  = BitConverter.Int32BitsToSingle(System.Buffers.Binary.BinaryPrimitives.ReadInt32LittleEndian(span.Slice(pos+4,4)));
-            ushort offs = System.Buffers.Binary.BinaryPrimitives.ReadUInt16LittleEndian(span.Slice(pos+8,2));
+        for (uint i = 0; i < cnt; i++, pos += entry)
+        {
+            ushort type = BinaryPrimitives.ReadUInt16LittleEndian(span.Slice(pos+0,2));
+            ushort pitch= BinaryPrimitives.ReadUInt16LittleEndian(span.Slice(pos+2,2));
+            float  vel  = BitConverter.Int32BitsToSingle(
+                            BinaryPrimitives.ReadInt32LittleEndian(span.Slice(pos+4,4)));
+            ushort offs = BinaryPrimitives.ReadUInt16LittleEndian(span.Slice(pos+8,2));
+
             evts.Add(new Evt(type, pitch, vel, offs));
         }
-        // детерминистский порядок: сначала меньший offs, при равенстве — noteOff(2) перед noteOn(1)
-        evts.Sort((a,b) => a.Offs!=b.Offs ? a.Offs.CompareTo(b.Offs) : a.Type.CompareTo(b.Type));
+
+        // сортировка по offs, затем OFF перед ON
+        evts.Sort((a,b) => a.Offs != b.Offs ? a.Offs.CompareTo(b.Offs) : a.Type.CompareTo(b.Type));
         return true;
     }
+
 
     public AudioRuntimeSession(ILogger<AudioRuntimeSession> log, VstEngine vst, IConfiguration cfg)
     {
@@ -132,16 +148,25 @@ public sealed class AudioRuntimeSession : IRuntimeSession
                     continue;
                 }
 
-                if (span.Length >= 4 && span[0]=='E' && span[1]=='V' && span[2]=='T' && span[3]=='0')
+                if (span.Length >= 4 && span[0]=='E' && span[1]=='V' && span[2]=='T' && span[3]=='1')
                 {
-                    if (TryParseEvt0(span, out var sseq, out var list))
+                    if (TryParseEvt1(span, out var sseq, out var frames, out var list))
                     {
-                        _eventsBySeq.AddOrUpdate(sseq,
-                            _ => list,
-                            (_, old) => { old.AddRange(list); old.Sort((a,b) => a.Offs!=b.Offs ? a.Offs.CompareTo(b.Offs) : a.Type.CompareTo(b.Type)); return old; });
+                        _eventsBySeq.AddOrUpdate(
+                            sseq,
+                            _ => new EvtBlock(frames, list),
+                            (_, old) =>
+                            {
+                                var merged = old.Events;
+                                merged.AddRange(list);
+                                merged.Sort((a,b) => a.Offs != b.Offs ? a.Offs.CompareTo(b.Offs) : a.Type.CompareTo(b.Type));
+                                // если вдруг придёт другой frames для того же seq — можно взять max/последний
+                                return old with { BlockFrames = Math.Max(old.BlockFrames, frames) };
+                            });
                     }
                     continue;
                 }
+
 
                 if (s.Equals("panic", StringComparison.OrdinalIgnoreCase))
                 {
@@ -206,36 +231,37 @@ public sealed class AudioRuntimeSession : IRuntimeSession
                 float[]? outBuf = null;
 
                 // достаём события для текущего seq (если есть)
-                List<Evt>? evtsForBlock = null;
+                EvtBlock? blk = null;
 
                 if (offline)
                 {
-                    // ждём до 50 мс прихода EVT0 для этого seq (обычно прилетает мгновенно)
                     var t0 = Stopwatch.GetTimestamp();
                     var frequency = (double)Stopwatch.Frequency;
-                    while (!_eventsBySeq.TryRemove(seq, out evtsForBlock))
+                    while (!_eventsBySeq.TryRemove(seq, out blk))
                     {
                         var elapsed = (Stopwatch.GetTimestamp() - t0) / frequency;
-                        if (elapsed > 0.050) break; // таймаут
+                        if (elapsed > 0.050) break;
                         await Task.Delay(0, ct);
                     }
                 }
                 else
                 {
-                    _eventsBySeq.TryRemove(seq, out evtsForBlock);
+                    _eventsBySeq.TryRemove(seq, out blk);
                 }
+                List<Evt>? evtsForBlock = blk?.Events;
+                int framesForBlock = blk?.BlockFrames ?? _vst.BlockSize;
+                int block = framesForBlock;
 
                 if (evtsForBlock is null || evtsForBlock.Count == 0)
                 {
                     // как раньше — один заход
-                    var audio = _vst.Process(blockSize); // frames == _vst.BlockSize
+                    var audio = _vst.Process(block);
                     // упаковка...
                     var frame = Aud0.Pack(seq, ts, sampleRate, channels, audio);
                     await ch.SendAsync(frame, "application/octet-stream", true, ct);
                 }
                 else
                 {
-                    int block = _vst.BlockSize;
                     // Гарантируем размер под весь блок и очищаем на всякий случай
                     if (outBuf is null || outBuf.Length != block * channels)
                         outBuf = new float[block * channels];
@@ -279,7 +305,7 @@ public sealed class AudioRuntimeSession : IRuntimeSession
                 }
 
                 seq++;
-                ts += (ulong)blockSize;
+                ts += (ulong)framesForBlock;
 
                 // в оффлайне — без задержек!
                 if (!offline)
