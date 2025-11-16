@@ -5,20 +5,13 @@ using ComposeNowPlugins.Wrappers;
 
 namespace ComposeNowPlugins.Transports;
 
-public sealed class AudioRuntimeSession : IRuntimeSession
+public sealed class AudioRuntimeSession(ILogger<AudioRuntimeSession> log, VstEngine vst, IConfiguration cfg) : IRuntimeSession
 {
-    private readonly ILogger<AudioRuntimeSession> _log;
-    private readonly VstEngine _vst;
-    private readonly IConfiguration _cfg;
+    private readonly ILogger<AudioRuntimeSession> _log = log;
+    private readonly VstEngine _vst = vst;
+    private readonly IConfiguration _cfg = cfg;
 
-    private readonly int _sampleRate;
     private readonly int _channels = 2;
-    private readonly int _blockSize;
-
-    // задержка
-    private readonly int _delayMs;
-    private readonly int _delaySamples;
-    private readonly Queue<float> _delayFifo = new();
 
     record Evt(int Type, int Pitch, float Vel, int Offs); // Type: 1=on, 2=off
     record EvtBlock(int BlockFrames, List<Evt> Events);
@@ -60,24 +53,10 @@ public sealed class AudioRuntimeSession : IRuntimeSession
         return true;
     }
 
-
-    public AudioRuntimeSession(ILogger<AudioRuntimeSession> log, VstEngine vst, IConfiguration cfg)
-    {
-        _log = log;
-        _vst = vst;
-        _cfg = cfg;
-
-        _sampleRate = vst.SampleRate;
-        _blockSize = vst.BlockSize;
-
-        _delayMs = /*int.Parse(cfg["AUDIO_DEV_DELAY_MS"] ?? "0")*/0;
-        _delaySamples = (int)(_sampleRate * (_delayMs / 1000.0));
-    }
-
     public async Task RunAsync(IRuntimeChannel ch, CancellationToken ct)
     {
         // 0) --- HANDSHAKE: ждём hello от клиента (ТЕКСТ) ---
-        int sampleRate = _sampleRate, channels = _channels, blockSize = _blockSize;
+        int sampleRate = 1, channels = _channels, blockSize = 1;
         var mode = "realtime";
 
         // 1) фьючерс, который выполнится при получении hello
