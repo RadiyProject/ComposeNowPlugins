@@ -76,4 +76,21 @@ internal static partial class VstNative
     [return: MarshalAs(UnmanagedType.I1)]
     public static partial bool VstReconfigure(
         IntPtr h, double sampleRate, int blockSize, int channels, int processMode /*0=rt,1=offline*/);
+
+    [LibraryImport(libBase)]
+    [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
+    [return: MarshalAs(UnmanagedType.I1)]
+    public static partial bool VstGetState(
+        IntPtr h,
+        IntPtr buffer,          // может быть IntPtr.Zero
+        ref uint size);         // in/out: размер буфера / фактический размер
+
+    // bool VstSetState(VstHandle* h, const void* buffer, uint32_t size);
+    [LibraryImport(libBase)]
+    [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
+    [return: MarshalAs(UnmanagedType.I1)]
+    public static partial bool VstSetState(
+        IntPtr h,
+        byte[] buffer,
+        uint size);
 }

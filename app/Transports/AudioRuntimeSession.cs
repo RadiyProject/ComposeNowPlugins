@@ -118,7 +118,7 @@ public sealed class AudioRuntimeSession(ILogger<AudioRuntimeSession> log, VstEng
                 if (span.Length == 8 &&
                     span[0] == 'C' && span[1] == 'R' && span[2] == 'D' && span[3] == '0')
                 {
-                    uint blocks = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(span[4..]);
+                    uint blocks = BinaryPrimitives.ReadUInt32LittleEndian(span[4..]);
                     if (blocks > 0)
                     {
                         Interlocked.Add(ref credits, (int)blocks);

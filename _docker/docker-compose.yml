@@ -1,18 +1,20 @@
+name: compose-now
+
 services:
-  vst-host:
+  gateway:
     build:
       context: .
       target: dev
-    image: vst-host:dev
+    image: gateway:dev
     restart: on-failure
     networks:
       - radx
     env_file:
       - ../.env
     environment:
-      DOTNET_USE_POLLING_FILE_WATCHER: 1
-      DOTNET_WATCH_SUPPRESS_LAUNCH: 1
-      ASPNETCORE_ENVIRONMENT: Development
+      DOTNET_USE_POLLING_FILE_WATCHER: ${DOTNET_USE_POLLING_FILE_WATCHER}
+      DOTNET_WATCH_SUPPRESS_LAUNCH: ${DOTNET_WATCH_SUPPRESS_LAUNCH}
+      ASPNETCORE_ENVIRONMENT: ${APP_MODE}
     ports:
       - "${ASPNETCORE_PORT}:5001"
     volumes:
@@ -21,6 +23,39 @@ services:
       - ../logs:/logs
       - /app/obj
       - /app/bin
+
+  worker:
+    build:
+      context: .
+      target: dev
+    image: worker:dev
+    restart: on-failure
+    networks:
+      - radx
+    env_file:
+      - ../.env
+    environment:
+      DOTNET_USE_POLLING_FILE_WATCHER: ${DOTNET_USE_POLLING_FILE_WATCHER}
+      DOTNET_WATCH_SUPPRESS_LAUNCH: ${DOTNET_WATCH_SUPPRESS_LAUNCH}
+      ASPNETCORE_ENVIRONMENT: ${APP_MODE}
+    volumes:
+      - ../worker:/app
+      - ../vst_builds:/plugins:ro
+      - ../logs:/logs
+      - /app/obj
+      - /app/bin
+
+  redis:
+    restart: always
+    image: redis:8.6.1
+    volumes:
+      - ../redis:/data
+    networks:
+      - radx
+    expose:
+      - 6379
+    environment:
+      - REDIS_PASSWORD=${REDIS_PASSWORD}
 
 networks:
   radx:
