@@ -1,50 +1,13 @@
-using ComposeNowPlugins.Transports;
-using ComposeNowPlugins.Transports.WebSockets;
-using ComposeNowPlugins.Wrappers;
-using StackExchange.Redis;
-
+using ComposeNowPlugins.Extensions;
 
 var builder = WebApplication.CreateBuilder(args);
 
-// Add services to the container.
-builder.Services.AddControllers();
-
-builder.Services.AddScoped<VstEngine>();
-
-builder.Services.AddScoped<IRuntimeSessionFactory, RuntimeSessionFactory>();
-builder.Services.AddScoped<EchoRuntimeSession>();
-builder.Services.AddScoped<AudioRuntimeSession>();
-
-builder.Services.AddScoped<WebSocketTransport>();
-builder.Services.AddScoped<IRealtimeTransport>(serviceProvider =>//Decorator (Scrutor)
-    new LoggingTransport(
-        serviceProvider.GetRequiredService<WebSocketTransport>(),
-        serviceProvider.GetRequiredService<ILogger<LoggingTransport>>()
-    ));
-
-string? redisPassword = Environment.GetEnvironmentVariable("REDIS_PASSWORD");
-builder.Services.AddSingleton<IConnectionMultiplexer>(
-        ConnectionMultiplexer.Connect($"redis:6379,password={redisPassword}")
-    );
+builder.Configuration
+    .AddJsonFile("plugins.catalog.json", optional: false, reloadOnChange: true);
+builder.Services.AddApplicationServices(builder.Configuration);
 
 var app = builder.Build();
 
-app.MapGet("/healthcheck", () =>
-{
-    return "Everything work's fine";
-});
-
-app.UseRouting();
-
-var webSocketOptions = new WebSocketOptions
-{
-    KeepAliveInterval = TimeSpan.FromMinutes(2)
-};
-
-//webSocketOptions.AllowedOrigins.Add("https://client.com");
-
-app.UseWebSockets(webSocketOptions);
-
-app.MapControllers();
+app.UseApplicationPipeline();
 
 app.Run();

@@ -5,11 +5,10 @@ using ComposeNowPlugins.Wrappers;
 
 namespace ComposeNowPlugins.Transports;
 
-public sealed class AudioRuntimeSession(ILogger<AudioRuntimeSession> log, VstEngine vst, IConfiguration cfg) : IRuntimeSession
+public sealed class AudioRuntimeSession(ILogger<AudioRuntimeSession> log, IVstEngineFactory vstEngineFactory) : IRuntimeSession
 {
     private readonly ILogger<AudioRuntimeSession> _log = log;
-    private readonly VstEngine _vst = vst;
-    private readonly IConfiguration _cfg = cfg;
+    private readonly VstEngine _vst = vstEngineFactory.Create("SineSynth");//TODO: автоматически задавать это значение от самого клиента
 
     private readonly int _channels = 2;
 

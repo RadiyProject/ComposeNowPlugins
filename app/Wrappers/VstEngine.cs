@@ -1,5 +1,3 @@
-using StackExchange.Redis;
-
 namespace ComposeNowPlugins.Wrappers;
 
 public sealed class VstEngine : IAsyncDisposable
@@ -11,26 +9,42 @@ public sealed class VstEngine : IAsyncDisposable
     private int _channels = 2;
     private float[] _tmp;
 
-    public VstEngine(IConfiguration cfg, ILogger<VstEngine> log, 
-        int? sampleRate = null, int? blockSize = null, int? channels = null)
+    public VstEngine(string pluginPath, ILogger<VstEngine> log, int sampleRate = 44100,
+        int blockSize = 512, int channels = 2)
     {
         _log = log;
+        if (string.IsNullOrWhiteSpace(pluginPath))
+        {
+            throw new ArgumentException("Plugin path cannot be empty.", nameof(pluginPath));
+        }
+        if (!File.Exists(pluginPath) && !Directory.Exists(pluginPath))
+        {
+            throw new FileNotFoundException($"VST plugin was not found: {pluginPath}");
+        }
 
-        var pluginPath = cfg["VST3_PATH"]!; // напр.: /app/plugins/SineSynth.vst3
-        _sampleRate = sampleRate ?? int.Parse(cfg["AUDIO_SAMPLE_RATE"] ?? "48000");
-        _blockSize = blockSize ?? int.Parse(cfg["AUDIO_BLOCK_SIZE"] ?? "512");
+        _sampleRate = Math.Max(1, sampleRate);
+        _blockSize = Math.Max(1, blockSize);
+        _channels = Math.Max(1, channels);
 
         _host = VstNative.VstCreate(pluginPath, _sampleRate, _blockSize, _channels);
-        if (_host == IntPtr.Zero) throw new InvalidOperationException("vst_create failed");
+        if (_host == IntPtr.Zero)
+        {
+            throw new InvalidOperationException($"vst_create failed for plugin: {pluginPath}");
+        }
 
-        var devDelayMs = /*int.Parse(cfg["AUDIO_DEV_DELAY_MS"] ?? "0")*/0;
+        var devDelayMs = 0;
         var latencySamples = (uint)(_sampleRate * (devDelayMs / 1000.0));
         VstNative.VstSetLatency(_host, latencySamples);
 
         _tmp = new float[_blockSize * _channels];
 
-        _log?.LogInformation("VstEngine ready: {Path} @ {SR} Hz, block {Block}, ch {Ch}, latency {delay} ms",
-            pluginPath, _sampleRate, _blockSize, _channels, devDelayMs);
+        _log?.LogInformation(
+            "VstEngine ready: {Path} @ {SR} Hz, block {Block}, ch {Ch}",
+            pluginPath,
+            _sampleRate,
+            _blockSize,
+            _channels
+        );
     }
 
     public int SampleRate => _sampleRate;
@@ -93,19 +107,20 @@ public sealed class VstEngine : IAsyncDisposable
     /// </summary>
     public unsafe byte[] GetState()
     {
-        if (_host == IntPtr.Zero)
-        {
-            throw new ObjectDisposedException(nameof(VstEngine));
-        }
+        ObjectDisposedException.ThrowIf(_host == IntPtr.Zero, nameof(VstEngine));
 
         uint size = 0;
 
         // 1) Первый вызов — узнать размер
         if (!VstNative.VstGetState(_host, IntPtr.Zero, ref size))
+        {
             throw new InvalidOperationException("VstGetState (size query) failed.");
+        }
 
         if (size == 0)
+        {
             return [];
+        }
 
         var buf = new byte[size];
 
@@ -119,7 +134,9 @@ public sealed class VstEngine : IAsyncDisposable
 
         // size может быть меньше, чем первоначальная оценка, на всякий случай подрежем
         if (size != buf.Length)
+        {
             Array.Resize(ref buf, checked((int)size));
+        }
 
         return buf;
     }
@@ -129,15 +146,16 @@ public sealed class VstEngine : IAsyncDisposable
     /// </summary>
     public void SetState(byte[]? state)
     {
-        if (_host == IntPtr.Zero)
-        {
-            throw new ObjectDisposedException(nameof(VstEngine));
-        }
+        ObjectDisposedException.ThrowIf(_host == IntPtr.Zero, nameof(VstEngine));
 
         if (state is null || state.Length == 0)
+        {
             return;
+        }
 
         if (!VstNative.VstSetState(_host, state, (uint)state.Length))
+        {
             throw new InvalidOperationException("VstSetState failed.");
+        }
     }
 }

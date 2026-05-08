@@ -1,0 +1,10 @@
+{
+  "Plugins": [
+    {
+      "type": "Synth",
+      "name": "SineSynth",
+      "pluginPath": "SineSynthHeadless/VST3/Release/SineSynth.vst3",
+      "enabled": true
+    }
+  ]
+}

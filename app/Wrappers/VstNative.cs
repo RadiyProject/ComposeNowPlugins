@@ -21,7 +21,7 @@ internal static partial class VstNative
         // 1) Берём базу из ENV/конфига (например: /plugins/SineSynthHeadless/lib/Release)
         var baseDir = "/plugins/" + (
             Environment.GetEnvironmentVariable("VST_HOST_LIB_DIR")
-            ?? "SineSynthHeadless") + "/lib/Release";
+            ?? "SineSynthHeadless") + "/lib/Release";//TODO: вынести в отдельный проект с хостом
 
         // 2) Подбираем имя под ОС
         var fileName = $"lib{libBase}.so";
