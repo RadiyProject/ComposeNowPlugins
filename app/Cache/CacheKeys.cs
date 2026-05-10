@@ -13,4 +13,19 @@ public static class CacheKeys
     {
         return $"plugin-state:{pluginId.GetValue()}";
     }
+
+    public static string PluginBlockEvents(PluginId pluginId, ulong seq)
+    {
+        return $"plugin-events:{pluginId.GetValue()}:block:{seq}";
+    }
+
+    public static string PluginControlEvents(PluginId pluginId)
+    {
+        return $"plugin-events:{pluginId.GetValue()}:control";
+    }
+
+    public static string PluginEngineLock(string pluginName)
+    {
+        return $"plugin-engine-lock:{pluginName}";
+    }
 }

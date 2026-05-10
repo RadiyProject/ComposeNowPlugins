@@ -1,3 +1,5 @@
+using ComposeNowPlugins.Configurations;
+
 namespace ComposeNowPlugins.Wrappers;
 
 public sealed class VstEngine : IAsyncDisposable
@@ -148,14 +150,23 @@ public sealed class VstEngine : IAsyncDisposable
     {
         ObjectDisposedException.ThrowIf(_host == IntPtr.Zero, nameof(VstEngine));
 
-        if (state is null || state.Length == 0)
-        {
-            return;
-        }
+        state ??= [];
 
         if (!VstNative.VstSetState(_host, state, (uint)state.Length))
         {
             throw new InvalidOperationException("VstSetState failed.");
+        }
+    }
+
+    public PluginProcessingMode ProcessingMode
+    {
+        get
+        {
+            int mode = VstNative.VstGetProcessMode(_host);
+
+            return mode == 1
+                ? PluginProcessingMode.Offline
+                : PluginProcessingMode.Realtime;
         }
     }
 }

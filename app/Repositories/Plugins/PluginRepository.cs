@@ -52,7 +52,7 @@ public class PluginRepository(ICache cache, ILogger<PluginRepository> logger) : 
     {
         try
         {
-            string cacheKey = CacheKeys.PluginState(model.Id);
+            string cacheKey = CacheKeys.PluginState(key);
             await _cache.SetAsync(
                 cacheKey,
                 model,
@@ -66,6 +66,39 @@ public class PluginRepository(ICache cache, ILogger<PluginRepository> logger) : 
             _logger.LogError(
                 exception,
                 "Failed to update plugin state. PluginId={PluginId}",
+                key
+            );
+
+            return RepositoryActionStatus.Error;
+        }
+    }
+
+    public async Task<RepositoryActionStatus> RefreshTtlAsync(PluginId key)
+    {
+        try
+        {
+            bool refreshed = await _cache.RefreshAsync(
+                CacheKeys.PluginState(key),
+                DefaultTtl
+            );
+
+            if (!refreshed)
+            {
+                _logger.LogWarning(
+                    "Plugin state TTL was not refreshed because key does not exist. PluginId={PluginId}",
+                    key
+                );
+
+                return RepositoryActionStatus.Error;
+            }
+
+            return RepositoryActionStatus.Success;
+        }
+        catch (Exception exception)
+        {
+            _logger.LogError(
+                exception,
+                "Failed to refresh plugin state TTL. PluginId={PluginId}",
                 key
             );
 

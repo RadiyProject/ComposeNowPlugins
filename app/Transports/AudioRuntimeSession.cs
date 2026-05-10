@@ -1,308 +1,987 @@
 using System.Buffers.Binary;
-using System.Collections.Concurrent;
 using System.Diagnostics;
-using ComposeNowPlugins.Wrappers;
+using System.Globalization;
+using System.Text;
+using ComposeNowPlugins.Models;
+using ComposeNowPlugins.Models.Ids;
+using ComposeNowPlugins.Repositories;
+using ComposeNowPlugins.Repositories.Plugins;
+using ComposeNowPlugins.Services.Plugins;
+using ComposeNowPlugins.Services.Processing;
 
 namespace ComposeNowPlugins.Transports;
 
-public sealed class AudioRuntimeSession(ILogger<AudioRuntimeSession> log, IVstEngineFactory vstEngineFactory) : IRuntimeSession
+public sealed class AudioRuntimeSession(
+    PluginId pluginId,
+    string pluginName,
+    ILogger<AudioRuntimeSession> log,
+    IPluginCatalog pluginCatalog,
+    IPluginRepository pluginRepository,
+    IPluginEventRepository pluginEventRepository,
+    IPluginBlockProcessor pluginBlockProcessor
+) : IRuntimeSession
 {
+    private readonly PluginId _pluginId = pluginId;
+    private readonly string _pluginName = pluginName;
     private readonly ILogger<AudioRuntimeSession> _log = log;
-    private readonly VstEngine _vst = vstEngineFactory.Create("SineSynth");//TODO: автоматически задавать это значение от самого клиента
+    private readonly IPluginCatalog _pluginCatalog = pluginCatalog;
+    private readonly IPluginRepository _pluginRepository = pluginRepository;
+    private readonly IPluginEventRepository _pluginEventRepository = pluginEventRepository;
+    private readonly IPluginBlockProcessor _pluginBlockProcessor = pluginBlockProcessor;
 
-    private readonly int _channels = 2;
+    private const int DefaultChannels = 2;
+    private const string DefaultMode = "realtime";
 
-    record Evt(int Type, int Pitch, float Vel, int Offs); // Type: 1=on, 2=off
-    record EvtBlock(int BlockFrames, List<Evt> Events);
-    readonly ConcurrentDictionary<ulong, EvtBlock> _eventsBySeq = new();
+    private record Evt(int Type, int Pitch, float Vel, int Offs);
 
-    static bool TryParseEvt1(ReadOnlySpan<byte> span, out ulong seq, out int blockFrames, out List<Evt> evts)
+    private static readonly TimeSpan PluginCacheTtl = TimeSpan.FromMinutes(5);
+    private static readonly TimeSpan PluginCacheRenewBefore = TimeSpan.FromSeconds(30);
+    private static readonly TimeSpan PluginCacheRenewResponseTimeout = TimeSpan.FromSeconds(10);
+
+    private readonly Lock _pluginCacheRenewLock = new();
+
+    private string? _expectedPluginCacheRenewToken;
+    private TaskCompletionSource<string>? _pluginCacheRenewTcs;
+
+    private long _lastProcessedSeq = -1;
+
+    private static bool TryParseEvt1(
+        ReadOnlySpan<byte> span,
+        out ulong seq,
+        out int blockFrames,
+        out List<Evt> evts
+    )
     {
         evts = [];
         seq = 0;
         blockFrames = 0;
 
-        // min: 4(magic)+8(seq)+4(blockFrames)+4(cnt) = 20
-        if (span.Length < 20) return false;
-        if (!(span[0]=='E' && span[1]=='V' && span[2]=='T' && span[3]=='1')) return false;
+        // min: 4(magic) + 8(seq) + 4(blockFrames) + 4(cnt) = 20
+        if (span.Length < 20)
+        {
+            return false;
+        }
 
-        seq         = BinaryPrimitives.ReadUInt64LittleEndian(span.Slice(4, 8));
+        if (!(span[0] == 'E' && span[1] == 'V' && span[2] == 'T' && span[3] == '1'))
+        {
+            return false;
+        }
+
+        seq = BinaryPrimitives.ReadUInt64LittleEndian(span.Slice(4, 8));
         blockFrames = BinaryPrimitives.ReadInt32LittleEndian(span.Slice(12, 4));
-        uint cnt    = BinaryPrimitives.ReadUInt32LittleEndian(span.Slice(16, 4));
+        uint cnt = BinaryPrimitives.ReadUInt32LittleEndian(span.Slice(16, 4));
 
-        if (blockFrames <= 0) return false;
+        if (blockFrames <= 0)
+        {
+            return false;
+        }
 
         int pos = 20;
-        const int entry = 12;
-        if (span.Length < pos + entry * cnt) return false;
+        const int entrySize = 12;
 
-        for (uint i = 0; i < cnt; i++, pos += entry)
+        if (span.Length < pos + entrySize * cnt)
         {
-            ushort type = BinaryPrimitives.ReadUInt16LittleEndian(span.Slice(pos+0,2));
-            ushort pitch= BinaryPrimitives.ReadUInt16LittleEndian(span.Slice(pos+2,2));
-            float  vel  = BitConverter.Int32BitsToSingle(
-                            BinaryPrimitives.ReadInt32LittleEndian(span.Slice(pos+4,4)));
-            ushort offs = BinaryPrimitives.ReadUInt16LittleEndian(span.Slice(pos+8,2));
+            return false;
+        }
+
+        for (uint i = 0; i < cnt; i++, pos += entrySize)
+        {
+            ushort type = BinaryPrimitives.ReadUInt16LittleEndian(span.Slice(pos + 0, 2));
+            ushort pitch = BinaryPrimitives.ReadUInt16LittleEndian(span.Slice(pos + 2, 2));
+
+            float vel = BitConverter.Int32BitsToSingle(
+                BinaryPrimitives.ReadInt32LittleEndian(span.Slice(pos + 4, 4))
+            );
+
+            ushort offs = BinaryPrimitives.ReadUInt16LittleEndian(span.Slice(pos + 8, 2));
 
             evts.Add(new Evt(type, pitch, vel, offs));
         }
 
-        // сортировка по offs, затем OFF перед ON
-        evts.Sort((a,b) => a.Offs != b.Offs ? a.Offs.CompareTo(b.Offs) : a.Type.CompareTo(b.Type));
+        // По offset, затем NoteOff раньше NoteOn при одинаковом offset.
+        evts.Sort((a, b) =>
+            a.Offs != b.Offs
+                ? a.Offs.CompareTo(b.Offs)
+                : a.Type.CompareTo(b.Type)
+        );
+
         return true;
     }
 
-    public async Task RunAsync(IRuntimeChannel ch, CancellationToken ct)
+    public async Task RunAsync(
+        IRuntimeChannel ch,
+        CancellationToken ct
+    )
     {
-        // 0) --- HANDSHAKE: ждём hello от клиента (ТЕКСТ) ---
-        int sampleRate = 1, channels = _channels, blockSize = 1;
-        var mode = "realtime";
+        using var sessionCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        CancellationToken sessionCt = sessionCts.Token;
 
-        // 1) фьючерс, который выполнится при получении hello
-        var helloTcs = new TaskCompletionSource<(int sampleRate, int blockSize, int channels, string mode)>(
-            TaskCreationOptions.RunContinuationsAsynchronously);
+        Plugin plugin = await EnsurePluginExistsAsync();
 
-        // кредитный счётчик и сигнал
+        await ch.SendAsync(
+            Encoding.UTF8.GetBytes($"plugin id {_pluginId.GetValue()}"),
+            "text/plain",
+            true,
+            sessionCt
+        );
+
+        int sampleRate = plugin.SampleRate;
+        int blockSize = plugin.BlockSize;
+        int channels = plugin.Channels > 0 ? plugin.Channels : DefaultChannels;
+        string mode = DefaultMode;
+
+        var helloTcs = new TaskCompletionSource<HelloOptions>(
+            TaskCreationOptions.RunContinuationsAsynchronously
+        );
+
         int credits = 0;
-        var creditSignal = new SemaphoreSlim(0, int.MaxValue);
+        using var creditSignal = new SemaphoreSlim(0, int.MaxValue);
 
-        // 1) Параллельное чтение входа (ноты/параметры)
-        var reader = Task.Run(async () =>
-        {
-            await foreach (var msg in ch.ReadAllAsync(ct))
+        Task reader = Task.Run(
+            async () =>
             {
-                var span = msg.Payload.Span;
+                await ReadInputLoopAsync(
+                    ch,
+                    helloTcs,
+                    creditSignal,
+                    () => Interlocked.Increment(ref credits),
+                    blocks => Interlocked.Add(ref credits, blocks),
+                    sessionCt
+                );
+            },
+            sessionCt
+        );
 
-                var s = System.Text.Encoding.UTF8.GetString(span).Trim();
-                if (s.StartsWith("hello ", StringComparison.OrdinalIgnoreCase))
-                {
-                    var p = s.Split(' ', StringSplitOptions.RemoveEmptyEntries);
-                    if (p.Length >= 5)
-                    {
-                        int _sr = int.Parse(p[1]);
-                        int _bs = int.Parse(p[2]);
-                        int _ch = int.Parse(p[3]);
-                        string _mode = p[4];
-                        // выставляем результат hello — только один раз
-                        helloTcs.TrySetResult((_sr, _bs, _ch, _mode));
-                    }
-                    continue;
-                }
+        Task pluginCacheLease = Task.Run(
+            () => RunPluginCacheLeaseLoopAsync(
+                ch,
+                sessionCts
+            ),
+            sessionCt
+        );
 
-                if (s.StartsWith("note on ", StringComparison.OrdinalIgnoreCase))
-                {
-                    var parts = s.Split(' ', StringSplitOptions.RemoveEmptyEntries);
-                    var note = int.Parse(parts[2]);
-                    var vel = parts.Length > 3 ? float.Parse(parts[3]) : 1f;
-                    _vst.NoteOn(note, vel);
-                    continue;
-                }
-                if (s.StartsWith("note off ", StringComparison.OrdinalIgnoreCase))
-                {
-                    var parts = s.Split(' ', StringSplitOptions.RemoveEmptyEntries);
-                    var note = int.Parse(parts[2]);
-                    _vst.NoteOff(note);
-                    continue;
-                }
-                if (s.StartsWith("param ", StringComparison.OrdinalIgnoreCase))
-                {
-                    var parts = s.Split(' ', StringSplitOptions.RemoveEmptyEntries);
-                    var id = uint.Parse(parts[1]);
-                    var norm = float.Parse(parts[2], System.Globalization.CultureInfo.InvariantCulture);
-                    _vst.SetParam(id, norm);
-                    continue;
-                }
+        try
+        {
+            HelloOptions? hello = await WaitHelloAsync(
+                helloTcs,
+                sessionCt
+            );
 
-                // бинарные управляющие кадры
-                if (span.Length == 8 &&
-                    span[0] == 'C' && span[1] == 'R' && span[2] == 'D' && span[3] == '0')
-                {
-                    uint blocks = BinaryPrimitives.ReadUInt32LittleEndian(span[4..]);
-                    if (blocks > 0)
-                    {
-                        Interlocked.Add(ref credits, (int)blocks);
-                        creditSignal.Release(); // разбудим продюсера
-                    }
-                    continue;
-                }
+            if (hello is not null)
+            {
+                sampleRate = hello.SampleRate;
+                blockSize = hello.BlockSize;
+                channels = hello.Channels;
+                mode = hello.Mode;
 
-                if (span.Length >= 4 && span[0]=='E' && span[1]=='V' && span[2]=='T' && span[3]=='1')
-                {
-                    if (TryParseEvt1(span, out var sseq, out var frames, out var list))
-                    {
-                        _eventsBySeq.AddOrUpdate(
-                            sseq,
-                            _ => new EvtBlock(frames, list),
-                            (_, old) =>
-                            {
-                                var merged = old.Events;
-                                merged.AddRange(list);
-                                merged.Sort((a,b) => a.Offs != b.Offs ? a.Offs.CompareTo(b.Offs) : a.Type.CompareTo(b.Type));
-                                // если вдруг придёт другой frames для того же seq — можно взять max/последний
-                                return old with { BlockFrames = Math.Max(old.BlockFrames, frames) };
-                            });
-                    }
-                    continue;
-                }
-
-
-                if (s.Equals("panic", StringComparison.OrdinalIgnoreCase))
-                {
-                    // мгновенно гасим все голоса
-                    for (int n = 0; n < 128; n++) _vst.NoteOff(n);
-                    // если у синта есть «сустейн» — принудительно отпустить (если реализовано через параметр/CC64)
-                    // _vst.SetParam(CC64ParamId, 0f);
-                    continue;
-                }
+                _log.LogInformation(
+                    "Hello received. PluginId={PluginId}, SampleRate={SampleRate}, BlockSize={BlockSize}, Channels={Channels}, Mode={Mode}",
+                    _pluginId,
+                    sampleRate,
+                    blockSize,
+                    channels,
+                    mode
+                );
             }
-        }, ct);
+            else
+            {
+                _log.LogWarning(
+                    "Hello was not received. PluginId={PluginId}",
+                    _pluginId
+                );
+            }
 
-        // 2) Стрим аудио с тактированием по blockSize/sampleRate
-        var period = TimeSpan.FromSeconds((double)blockSize / sampleRate);
-        var next = Stopwatch.GetTimestamp();
-        var freq = (double)Stopwatch.Frequency;
+            bool offline = string.Equals(
+                mode,
+                "offline",
+                StringComparison.OrdinalIgnoreCase
+            );
 
-        ulong seq = 0, ts = 0;
+            plugin.SetAudioConfiguration(
+                sampleRate,
+                blockSize,
+                channels
+            );
 
-        // 3) ждём hello с таймаутом (чтобы не зависнуть, если клиент его не шлёт)
+            await _pluginRepository.UpdateAsync(
+                _pluginId,
+                plugin
+            );
+
+            await RunProcessingLoopAsync(
+                ch,
+                sampleRate,
+                blockSize,
+                channels,
+                offline,
+                () => Volatile.Read(ref credits),
+                () => Interlocked.Decrement(ref credits),
+                creditSignal,
+                sessionCt
+            );
+        }
+        finally
+        {
+            await sessionCts.CancelAsync();
+
+            try
+            {
+                await reader;
+            }
+            catch (OperationCanceledException)
+            {
+                // Нормальное завершение при закрытии соединения.
+            }
+            catch (Exception exception)
+            {
+                _log.LogWarning(
+                    exception,
+                    "Audio input reader failed. PluginId={PluginId}",
+                    _pluginId
+                );
+            }
+
+            try
+            {
+                await pluginCacheLease;
+            }
+            catch (OperationCanceledException)
+            {
+                // Нормальное завершение при закрытии соединения.
+            }
+            catch (Exception exception)
+            {
+                _log.LogWarning(
+                    exception,
+                    "Plugin cache lease loop failed. PluginId={PluginId}",
+                    _pluginId
+                );
+            }
+        }
+    }
+
+    private async Task<HelloOptions?> WaitHelloAsync(
+        TaskCompletionSource<HelloOptions> helloTcs,
+        CancellationToken ct
+    )
+    {
         try
         {
             using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-            cts.CancelAfter(TimeSpan.FromSeconds(2)); // таймаут хэндшейка (на вкус)
-            var res = await helloTcs.Task.WaitAsync(cts.Token);
-            sampleRate = res.sampleRate;
-            blockSize = res.blockSize;
-            channels = res.channels;
-            mode = res.mode;
+            cts.CancelAfter(TimeSpan.FromSeconds(2));
+
+            return await helloTcs.Task.WaitAsync(cts.Token);
         }
-        catch (OperationCanceledException)
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
         {
-            // hello не пришёл вовремя — остаёмся на дефолтах (_sampleRate/_blockSize/_channels, realtime)
+            _log.LogDebug(
+                "Hello was not received in time. PluginId={PluginId}",
+                _pluginId
+            );
+
+            return null;
         }
+    }
 
-        var offline = string.Equals(mode, "offline", StringComparison.OrdinalIgnoreCase);
+    private async Task<Plugin> EnsurePluginExistsAsync()
+    {
+        Plugin? existing = await _pluginRepository.GetAsync(_pluginId);
 
-        var ok = _vst.Reconfigure(sampleRate, blockSize, channels, offline);
-        if (!ok)
+        if (existing is not null)
         {
-            _log.LogWarning("VST reconfigure failed: sr={sr}, bs={bs}, ch={ch}, offline={offline}",
-                sampleRate, blockSize, channels, offline);
-            // опционально: откатиться к дефолтам или завершить сессию
-            // return; // если хочешь оборвать поток
+            return existing;
         }
 
-        // обновляем тайминг под новые параметры
-        period = TimeSpan.FromSeconds((double)blockSize / sampleRate);
-        next = Stopwatch.GetTimestamp();
+        var descriptor = _pluginCatalog.GetRequired(_pluginName)
+            ?? throw new InvalidOperationException(
+                $"Plugin '{_pluginName}' is not registered or disabled."
+            );
+
+        Plugin plugin = new(
+            _pluginId,
+            descriptor
+        );
+
+        RepositoryActionStatus status = await _pluginRepository.AddAsync(plugin);
+
+        if (status == RepositoryActionStatus.Success)
+        {
+            _log.LogInformation(
+                "Plugin state created. PluginId={PluginId}, PluginName={PluginName}",
+                _pluginId,
+                _pluginName
+            );
+
+            return plugin;
+        }
+
+        Plugin? createdByAnotherRequest = await _pluginRepository.GetAsync(_pluginId);
+
+        if (createdByAnotherRequest is not null)
+        {
+            return createdByAnotherRequest;
+        }
+
+        throw new InvalidOperationException(
+            $"Failed to create plugin state. PluginId={_pluginId}, PluginName={_pluginName}"
+        );
+    }
+
+    private async Task ReadInputLoopAsync(
+        IRuntimeChannel ch,
+        TaskCompletionSource<HelloOptions> helloTcs,
+        SemaphoreSlim creditSignal,
+        Action addSingleCredit,
+        Action<int> addCredits,
+        CancellationToken ct
+    )
+    {
+        await foreach (IncomingMessage msg in ch.ReadAllAsync(ct))
+        {
+            ReadOnlyMemory<byte> payload = msg.Payload;
+            ReadOnlySpan<byte> span = payload.Span;
+
+            if (msg.ContentType == "text/plain")
+            {
+                string text = Encoding.UTF8.GetString(span).Trim();
+
+                await HandleTextMessageAsync(
+                    text,
+                    helloTcs,
+                    ct
+                );
+
+                continue;
+            }
+
+            if (TryHandleCreditMessage(
+                span,
+                addCredits,
+                creditSignal
+            ))
+            {
+                continue;
+            }
+
+            if (TryParseEvt1Message(
+                span,
+                out ulong evtSeq,
+                out int blockFrames,
+                out List<Evt> evtList
+            ))
+            {
+                await SaveEvt1EventsAsync(
+                    evtSeq,
+                    blockFrames,
+                    evtList
+                );
+
+                continue;
+            }
+
+            _log.LogDebug(
+                "Unknown binary message. PluginId={PluginId}, Length={Length}",
+                _pluginId,
+                span.Length
+            );
+        }
+    }
+
+    private async Task SaveEvt1EventsAsync(
+        ulong seq,
+        int blockFrames,
+        List<Evt> events
+    )
+    {
+        long lastProcessedSeq = Volatile.Read(ref _lastProcessedSeq);
+
+        bool isLate = seq <= (ulong)Math.Max(0, lastProcessedSeq);
+
+        foreach (Evt item in events)
+        {
+            PluginEvent pluginEvent = item.Type == 2
+                ? PluginEvent.NoteOff(
+                    _pluginId,
+                    item.Pitch,
+                    seq,
+                    item.Offs,
+                    blockFrames
+                )
+                : PluginEvent.NoteOn(
+                    _pluginId,
+                    item.Pitch,
+                    item.Vel,
+                    seq,
+                    item.Offs,
+                    blockFrames
+                );
+
+            if (isLate)
+            {
+                _log.LogWarning(
+                    "Late EVT1 event. Applying as control event. PluginId={PluginId}, EventSeq={EventSeq}, LastProcessedSeq={LastProcessedSeq}, Type={Type}, Pitch={Pitch}",
+                    _pluginId.GetValue(),
+                    seq,
+                    lastProcessedSeq,
+                    item.Type,
+                    item.Pitch
+                );
+
+                await _pluginEventRepository.AddControlEventAsync(
+                    _pluginId,
+                    pluginEvent
+                );
+            }
+            else
+            {
+                await _pluginEventRepository.AddBlockEventAsync(
+                    _pluginId,
+                    seq,
+                    pluginEvent
+                );
+            }
+        }
+    }
+
+    private async Task HandleTextMessageAsync(
+        string text,
+        TaskCompletionSource<HelloOptions> helloTcs,
+        CancellationToken ct
+    )
+    {
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return;
+        }
+
+        if (TryHandlePluginCacheRenewConfirmation(text))
+        {
+            return;
+        }
+
+        if (TryParseHello(
+            text,
+            out HelloOptions? hello
+        ))
+        {
+            helloTcs.TrySetResult(hello!);
+            return;
+        }
+
+        if (await TryHandleNoteOnAsync(text))
+        {
+            return;
+        }
+
+        if (await TryHandleNoteOffAsync(text))
+        {
+            return;
+        }
+
+        if (await TryHandleParamAsync(text))
+        {
+            return;
+        }
+
+        if (await TryHandlePanicAsync(text))
+        {
+            return;
+        }
+
+        _log.LogDebug(
+            "Unknown text message. PluginId={PluginId}, Text={Text}",
+            _pluginId,
+            text
+        );
+    }
+
+    private static bool TryParseHello(
+        string text,
+        out HelloOptions? hello
+    )
+    {
+        hello = null;
+
+        if (!text.StartsWith("hello ", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        string[] parts = text.Split(
+            ' ',
+            StringSplitOptions.RemoveEmptyEntries
+        );
+
+        if (parts.Length < 5)
+        {
+            return true;
+        }
+
+        if (!int.TryParse(parts[1], out int sampleRate) ||
+            !int.TryParse(parts[2], out int blockSize) ||
+            !int.TryParse(parts[3], out int channels))
+        {
+            return true;
+        }
+
+        hello = new HelloOptions(
+            sampleRate,
+            blockSize,
+            channels,
+            parts[4]
+        );
+
+        return true;
+    }
+
+    private async Task<bool> TryHandleNoteOnAsync(string text)
+    {
+        if (!text.StartsWith("note on ", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        string[] parts = text.Split(
+            ' ',
+            StringSplitOptions.RemoveEmptyEntries
+        );
+
+        if (parts.Length < 3)
+        {
+            return true;
+        }
+
+        if (!int.TryParse(parts[2], out int note))
+        {
+            return true;
+        }
+
+        float velocity = 1f;
+
+        if (parts.Length > 3)
+        {
+            float.TryParse(
+                parts[3],
+                NumberStyles.Float,
+                CultureInfo.InvariantCulture,
+                out velocity
+            );
+        }
+
+        await _pluginEventRepository.AddControlEventAsync(
+            _pluginId,
+            PluginEvent.NoteOn(
+                _pluginId,
+                note,
+                velocity
+            )
+        );
+
+        return true;
+    }
+
+    private async Task<bool> TryHandleNoteOffAsync(string text)
+    {
+        if (!text.StartsWith("note off ", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        string[] parts = text.Split(
+            ' ',
+            StringSplitOptions.RemoveEmptyEntries
+        );
+
+        if (parts.Length < 3)
+        {
+            return true;
+        }
+
+        if (!int.TryParse(parts[2], out int note))
+        {
+            return true;
+        }
+
+        await _pluginEventRepository.AddControlEventAsync(
+            _pluginId,
+            PluginEvent.NoteOff(
+                _pluginId,
+                note
+            )
+        );
+
+        return true;
+    }
+
+    private async Task<bool> TryHandleParamAsync(string text)
+    {
+        if (!text.StartsWith("param ", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        string[] parts = text.Split(
+            ' ',
+            StringSplitOptions.RemoveEmptyEntries
+        );
+
+        if (parts.Length < 3)
+        {
+            return true;
+        }
+
+        if (!uint.TryParse(parts[1], out uint parameterId))
+        {
+            return true;
+        }
+
+        if (!float.TryParse(
+            parts[2],
+            NumberStyles.Float,
+            CultureInfo.InvariantCulture,
+            out float value
+        ))
+        {
+            return true;
+        }
+
+        await _pluginEventRepository.AddControlEventAsync(
+            _pluginId,
+            PluginEvent.Param(
+                _pluginId,
+                parameterId,
+                value
+            )
+        );
+
+        return true;
+    }
+
+    private async Task<bool> TryHandlePanicAsync(string text)
+    {
+        if (!text.Equals("panic", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        await _pluginEventRepository.AddControlEventAsync(
+            _pluginId,
+            PluginEvent.Panic(_pluginId)
+        );
+
+        return true;
+    }
+
+    private static bool TryHandleCreditMessage(
+        ReadOnlySpan<byte> span,
+        Action<int> addCredits,
+        SemaphoreSlim creditSignal
+    )
+    {
+        if (span.Length != 8 ||
+            span[0] != 'C' ||
+            span[1] != 'R' ||
+            span[2] != 'D' ||
+            span[3] != '0')
+        {
+            return false;
+        }
+
+        uint blocks = BinaryPrimitives.ReadUInt32LittleEndian(span[4..]);
+
+        if (blocks == 0)
+        {
+            return true;
+        }
+
+        int creditsToAdd = blocks > int.MaxValue
+            ? int.MaxValue
+            : (int)blocks;
+
+        addCredits(creditsToAdd);
+        creditSignal.Release();
+
+        return true;
+    }
+
+    private static bool TryParseEvt1Message(
+        ReadOnlySpan<byte> span,
+        out ulong seq,
+        out int blockFrames,
+        out List<Evt> events
+    )
+    {
+        seq = 0;
+        blockFrames = 0;
+        events = [];
+
+        if (span.Length < 4 ||
+            span[0] != 'E' ||
+            span[1] != 'V' ||
+            span[2] != 'T' ||
+            span[3] != '1')
+        {
+            return false;
+        }
+
+        return TryParseEvt1(
+            span,
+            out seq,
+            out blockFrames,
+            out events
+        );
+    }
+
+    private async Task RunPluginCacheLeaseLoopAsync(
+        IRuntimeChannel ch,
+        CancellationTokenSource sessionCts
+    )
+    {
+        CancellationToken ct = sessionCts.Token;
+
+        TimeSpan delay = PluginCacheTtl - PluginCacheRenewBefore;
+
+        if (delay <= TimeSpan.Zero)
+        {
+            delay = TimeSpan.FromSeconds(30);
+        }
 
         try
         {
             while (!ct.IsCancellationRequested)
             {
-                // ждём кредит в оффлайне и в реальном времени — одинаково безопасно
-                if (offline)
+                await Task.Delay(
+                    delay,
+                    ct
+                );
+
+                string token = Guid.NewGuid().ToString("N");
+
+                var tcs = new TaskCompletionSource<string>(
+                    TaskCreationOptions.RunContinuationsAsynchronously
+                );
+
+                lock (_pluginCacheRenewLock)
                 {
-                    while (Volatile.Read(ref credits) <= 0)
-                        await creditSignal.WaitAsync(ct);
+                    _expectedPluginCacheRenewToken = token;
+                    _pluginCacheRenewTcs = tcs;
                 }
 
-                float[]? outBuf = null;
+                await ch.SendAsync(
+                    Encoding.UTF8.GetBytes($"plugin cache renew {token}"),
+                    "text/plain",
+                    endOfMessage: true,
+                    ct
+                );
 
-                // достаём события для текущего seq (если есть)
-                EvtBlock? blk = null;
+                Task completed = await Task.WhenAny(
+                    tcs.Task,
+                    Task.Delay(
+                        PluginCacheRenewResponseTimeout,
+                        ct
+                    )
+                );
 
-                if (offline)
+                if (completed != tcs.Task)
                 {
-                    var t0 = Stopwatch.GetTimestamp();
-                    var frequency = (double)Stopwatch.Frequency;
-                    while (!_eventsBySeq.TryRemove(seq, out blk))
+                    _log.LogWarning(
+                        "Plugin cache renew confirmation timeout. Closing websocket session. PluginId={PluginId}",
+                        _pluginId
+                    );
+
+                    await sessionCts.CancelAsync();
+                    return;
+                }
+
+                await tcs.Task;
+
+                RepositoryActionStatus status = await _pluginRepository.RefreshTtlAsync(
+                    _pluginId
+                );
+
+                if (status != RepositoryActionStatus.Success)
+                {
+                    _log.LogWarning(
+                        "Plugin cache TTL refresh failed. Closing websocket session. PluginId={PluginId}, Status={Status}",
+                        _pluginId,
+                        status
+                    );
+
+                    await sessionCts.CancelAsync();
+                    return;
+                }
+
+                _log.LogDebug(
+                    "Plugin cache TTL refreshed. PluginId={PluginId}",
+                    _pluginId
+                );
+
+                lock (_pluginCacheRenewLock)
+                {
+                    if (_expectedPluginCacheRenewToken == token)
                     {
-                        var elapsed = (Stopwatch.GetTimestamp() - t0) / frequency;
-                        if (elapsed > 0.050) break;
-                        await Task.Delay(0, ct);
+                        _expectedPluginCacheRenewToken = null;
+                        _pluginCacheRenewTcs = null;
                     }
-                }
-                else
-                {
-                    _eventsBySeq.TryRemove(seq, out blk);
-                }
-                List<Evt>? evtsForBlock = blk?.Events;
-                int framesForBlock = blk?.BlockFrames ?? _vst.BlockSize;
-                int block = framesForBlock;
-
-                if (evtsForBlock is null || evtsForBlock.Count == 0)
-                {
-                    // как раньше — один заход
-                    var audio = _vst.Process(block);
-                    // упаковка...
-                    var frame = Aud0.Pack(seq, ts, sampleRate, channels, audio);
-                    await ch.SendAsync(frame, "application/octet-stream", true, ct);
-                }
-                else
-                {
-                    // Гарантируем размер под весь блок и очищаем на всякий случай
-                    if (outBuf is null || outBuf.Length != block * channels)
-                        outBuf = new float[block * channels];
-                    else
-                        Array.Clear(outBuf, 0, outBuf.Length);
-
-                    int cursor = 0;
-                    foreach (var ev in evtsForBlock)
-                    {
-                        int offs = Math.Clamp(ev.Offs, 0, block-1);
-                        int len = Math.Max(0, offs - cursor);
-                        if (len > 0)
-                        {
-                            var part = _vst.Process(len);
-                            // копируем part в outBuf на позицию cursor
-                            var partArr = part.ToArray(); // если VstProcess не гарантирует фиксированный буфер
-                            Buffer.BlockCopy(partArr, 0, outBuf, cursor * channels * sizeof(float), partArr.Length * sizeof(float));
-                            cursor += len;
-                        }
-
-                        // применяем событие на точном сэмпле
-                        if (ev.Type == 2) _vst.NoteOff(ev.Pitch);     // OFF раньше ON при одинаковом offs
-                        else              _vst.NoteOn(ev.Pitch, ev.Vel);
-                    }
-                    // дорисовываем хвост блока
-                    if (cursor < block)
-                    {
-                        var tail = _vst.Process(block - cursor);
-                        var tailArr = tail.ToArray();
-                        Buffer.BlockCopy(tailArr, 0, outBuf, cursor * channels * sizeof(float), tailArr.Length * sizeof(float));
-                    }
-
-                    // пакуем готовый interleaved буфер
-                    var frame = Aud0.Pack(seq, ts, sampleRate, channels, outBuf);
-                    await ch.SendAsync(frame, "application/octet-stream", true, ct);
-                }
-
-                if (offline)
-                {
-                    Interlocked.Decrement(ref credits);
-                }
-
-                seq++;
-                ts += (ulong)framesForBlock;
-
-                // в оффлайне — без задержек!
-                if (!offline)
-                {
-                    next += (long)(period.TotalSeconds * freq);
-                    var delay = TimeSpan.FromSeconds((next - Stopwatch.GetTimestamp()) / freq);
-                    if (delay > TimeSpan.Zero) await Task.Delay(delay, ct);
                 }
             }
+        }
+        catch (OperationCanceledException)
+        {
+            // Нормальное завершение.
         }
         finally
         {
-            try { await reader; } catch { /* ignore */ }
-            try
+            lock (_pluginCacheRenewLock)
             {
-                for (int n = 0; n < 128; n++) _vst.NoteOff(n);
-                // короткий «дорасчёт» хвоста (если нужно) или просто ничего не шлём
+                _expectedPluginCacheRenewToken = null;
+                _pluginCacheRenewTcs = null;
             }
-            catch { }
         }
     }
+
+    private async Task RunProcessingLoopAsync(
+        IRuntimeChannel ch,
+        int sampleRate,
+        int blockSize,
+        int channels,
+        bool offline,
+        Func<int> getCredits,
+        Action decrementCredits,
+        SemaphoreSlim creditSignal,
+        CancellationToken ct
+    )
+    {
+        TimeSpan period = TimeSpan.FromSeconds(
+            (double)blockSize / sampleRate
+        );
+
+        long next = Stopwatch.GetTimestamp();
+        double freq = Stopwatch.Frequency;
+
+        ulong seq = 0;
+        ulong ts = 0;
+
+        while (!ct.IsCancellationRequested)
+        {
+            if (offline)
+            {
+                while (getCredits() <= 0)
+                {
+                    await creditSignal.WaitAsync(ct);
+                }
+            }
+
+            int framesForBlock = blockSize;
+            PluginBlockProcessResult result = await _pluginBlockProcessor.ProcessBlockAsync(
+                _pluginId,
+                seq,
+                framesForBlock,
+                offline,
+                ct
+            );
+            Volatile.Write(ref _lastProcessedSeq, (long)seq);
+
+            if (result.ShouldSend)
+            {
+                byte[] frame = Aud0.Pack(
+                    seq,
+                    ts,
+                    sampleRate,
+                    channels,
+                    result.Audio
+                );
+
+                await ch.SendAsync(
+                    frame,
+                    "application/octet-stream",
+                    endOfMessage: true,
+                    ct
+                );
+            }
+
+            if (offline)
+            {
+                decrementCredits();
+            }
+
+            seq++;
+            ts += (ulong)framesForBlock;
+
+            if (!offline)
+            {
+                long now = Stopwatch.GetTimestamp();
+                long periodTicks = (long)(period.TotalSeconds * freq);
+
+                next += periodTicks;
+
+                long lagTicks = now - next;
+
+                // Если отстали больше чем на 2 блока, не пытаемся "догонять" пачкой.
+                if (lagTicks > periodTicks * 2)
+                {
+                    next = now + periodTicks;
+
+                    // _log.LogWarning(
+                    //     "Realtime processing lag corrected. PluginId={PluginId}, Seq={Seq}, LagMs={LagMs:F2}",
+                    //     _pluginId.GetValue(),
+                    //     seq,
+                    //     lagTicks * 1000.0 / freq
+                    // );
+                }
+
+                TimeSpan delay = TimeSpan.FromSeconds(
+                    (next - Stopwatch.GetTimestamp()) / freq
+                );
+
+                if (delay > TimeSpan.Zero)
+                {
+                    await Task.Delay(delay, ct);
+                }
+            }
+        }
+    }
+
+    private bool TryHandlePluginCacheRenewConfirmation(string text)
+    {
+        const string prefix = "plugin cache renew ok ";
+
+        if (!text.StartsWith(
+            prefix,
+            StringComparison.OrdinalIgnoreCase
+        ))
+        {
+            return false;
+        }
+
+        string token = text[prefix.Length..].Trim();
+
+        if (string.IsNullOrWhiteSpace(token))
+        {
+            return true;
+        }
+
+        TaskCompletionSource<string>? tcs = null;
+
+        lock (_pluginCacheRenewLock)
+        {
+            if (_expectedPluginCacheRenewToken == token)
+            {
+                tcs = _pluginCacheRenewTcs;
+                _expectedPluginCacheRenewToken = null;
+                _pluginCacheRenewTcs = null;
+            }
+        }
+
+        tcs?.TrySetResult(token);
+
+        return true;
+    }
+
+    private sealed record HelloOptions(
+        int SampleRate,
+        int BlockSize,
+        int Channels,
+        string Mode
+    );
 }

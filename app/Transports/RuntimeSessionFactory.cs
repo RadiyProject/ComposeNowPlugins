@@ -1,14 +1,43 @@
+using ComposeNowPlugins.Models.Ids;
+
 namespace ComposeNowPlugins.Transports;
 
-public sealed class RuntimeSessionFactory(IServiceProvider serviceProvider) : IRuntimeSessionFactory
+public sealed class RuntimeSessionFactory(IServiceProvider serviceProvider,
+    ILogger<RuntimeSessionFactory> logger) : IRuntimeSessionFactory
 {
     private readonly IServiceProvider _serviceProvider = serviceProvider;
+    private readonly ILogger<RuntimeSessionFactory> _logger = logger;
 
     public IRuntimeSession Create(HttpContext context)
     {
-        var mode = context.Request.Query["mode"].ToString();
-        return mode == "audio"
-            ? _serviceProvider.GetRequiredService<AudioRuntimeSession>()
-            : _serviceProvider.GetRequiredService<EchoRuntimeSession>();
+        string mode = context.Request.Query["mode"].ToString();
+        _logger.LogInformation(
+            "Runtime session request. Path={Path}, Query={Query}, Mode={Mode}, PluginId={PluginId}",
+            context.Request.Path,
+            context.Request.QueryString,
+            mode,
+            context.Request.Query["pluginId"].ToString()
+        );
+        if (mode != "audio")
+        {
+            return _serviceProvider.GetRequiredService<EchoRuntimeSession>();
+        }
+
+        string pluginName = context.Request.Query["plugin"].ToString();
+        if (string.IsNullOrWhiteSpace(pluginName))
+        {
+            throw new FormatException($"Plugin name {pluginName} is incorrect or blank.");
+        }
+
+        string pluginIdValue = context.Request.Query["pluginId"].ToString();
+        PluginId pluginId = string.IsNullOrWhiteSpace(pluginIdValue)
+            ? PluginId.New()
+            : new PluginId(pluginIdValue);
+
+        return ActivatorUtilities.CreateInstance<AudioRuntimeSession>(
+            _serviceProvider,
+            pluginId,
+            pluginName
+        );
     }
 }

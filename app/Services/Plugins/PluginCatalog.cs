@@ -9,7 +9,7 @@ public sealed class PluginCatalog(IOptionsMonitor<PluginCatalogOptions> options)
 
     public IReadOnlyList<PluginDescriptor> GetAvailable()
     {
-        return [.. _options.CurrentValue.Plugins.Where(plugin => plugin.Enabled)];
+        return [.._options.CurrentValue.Plugins.Where(plugin => plugin.Enabled)];
     }
 
     public PluginDescriptor? GetRequired(string pluginName)

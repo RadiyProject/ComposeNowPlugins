@@ -1,19 +1,25 @@
+using System.Text.Json.Serialization;
 using ComposeNowPlugins.Configurations;
 using ComposeNowPlugins.Models.Ids;
 
 namespace ComposeNowPlugins.Models;
 
+[method: JsonConstructor]
 public class Plugin(
     PluginId id,
-    PluginType type,
+    PluginDescriptor descriptor,
     byte[]? state = null,
     Dictionary<uint, float>? parameters = null,
-    int sampleRate = 48000,
+    HashSet<int>? activeNotes = null,
+    bool waitingForReleaseSilence = false,
+    int consecutiveSilentBlocks = 0,
+    PluginProcessingMode processingMode = PluginProcessingMode.Realtime,
+    int sampleRate = 44100,
     int blockSize = 512,
     int channels = 2
 ) : Model<PluginId>(id)
 {
-    public PluginType Type { get; private set; } = type;
+    public PluginDescriptor Descriptor { get; private set; } = descriptor;
 
     /// <summary>
     /// Бинарное состояние VST-плагина.
@@ -21,11 +27,17 @@ public class Plugin(
     /// </summary>
     public byte[] State { get; private set; } = state ?? [];
 
+    public PluginProcessingMode ProcessingMode { get; private set; } = processingMode;
+
     /// <summary>
     /// Последние известные нормализованные параметры плагина.
     /// Ключ — ParamID, значение — normalized value 0..1.
     /// </summary>
     public Dictionary<uint, float> Parameters { get; private set; } = parameters ?? [];
+    public HashSet<int> ActiveNotes { get; private set; } = activeNotes ?? [];
+
+    public bool WaitingForReleaseSilence { get; private set; } = waitingForReleaseSilence;
+    public int ConsecutiveSilentBlocks { get; private set; } = consecutiveSilentBlocks;
 
     public int SampleRate { get; private set; } = sampleRate;
 
@@ -35,29 +47,82 @@ public class Plugin(
 
     public DateTimeOffset UpdatedAt { get; private set; } = DateTimeOffset.UtcNow;
 
-    public Plugin(
-        PluginType type,
-        byte[]? state = null, 
-        Dictionary<uint, float>? parameters = null,
-        int sampleRate = 48000, 
-        int blockSize = 512, 
-        int channels = 2
-    ) 
-        : this(
-            PluginId.New(),
-            type,
-            state,
-            parameters,
-            sampleRate,
-            blockSize,
-            channels
-        )
+    public bool HasActiveAudio()
     {
+        return ActiveNotes.Count > 0 || WaitingForReleaseSilence;
+    }
+
+    public void MarkNoteOn(int note)
+    {
+        ActiveNotes.Add(note);
+        WaitingForReleaseSilence = false;
+        ConsecutiveSilentBlocks = 0;
+        Touch();
+    }
+
+    public void MarkNoteOff(int note)
+    {
+        ActiveNotes.Remove(note);
+
+        if (ActiveNotes.Count == 0)
+        {
+            WaitingForReleaseSilence = true;
+            ConsecutiveSilentBlocks = 0;
+        }
+
+        Touch();
+    }
+
+    public void MarkAudioActivity(bool isSilent, int requiredSilentBlocks = 8)
+    {
+        if (ActiveNotes.Count > 0)
+        {
+            WaitingForReleaseSilence = false;
+            ConsecutiveSilentBlocks = 0;
+            Touch();
+            return;
+        }
+
+        if (!WaitingForReleaseSilence)
+        {
+            return;
+        }
+
+        if (isSilent)
+        {
+            ConsecutiveSilentBlocks++;
+
+            if (ConsecutiveSilentBlocks >= requiredSilentBlocks)
+            {
+                WaitingForReleaseSilence = false;
+                ConsecutiveSilentBlocks = 0;
+            }
+        }
+        else
+        {
+            ConsecutiveSilentBlocks = 0;
+        }
+
+        Touch();
+    }
+
+    public void Panic()
+    {
+        ActiveNotes.Clear();
+        WaitingForReleaseSilence = false;
+        ConsecutiveSilentBlocks = 0;
+        Touch();
     }
 
     public void SetState(byte[] state)
     {
         State = state;
+        Touch();
+    }
+
+    public void SetProcessingMode(PluginProcessingMode mode)
+    {
+        ProcessingMode = mode;
         Touch();
     }
 

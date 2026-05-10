@@ -10,7 +10,6 @@ public static class RuntimeSessionServiceCollectionExtensions
     {
         services.AddScoped<IRuntimeSessionFactory, RuntimeSessionFactory>();
         services.AddScoped<EchoRuntimeSession>();
-        services.AddScoped<AudioRuntimeSession>();
 
         return services;
     }

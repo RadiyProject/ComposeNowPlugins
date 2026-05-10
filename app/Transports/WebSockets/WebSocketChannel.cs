@@ -7,6 +7,7 @@ namespace ComposeNowPlugins.Transports.WebSockets;
 public class WebSocketChannel(WebSocket ws) : IRuntimeChannel
 {
     private readonly WebSocket _ws = ws;
+    private readonly SemaphoreSlim _sendLock = new(1, 1);
     public string Transport => "websocket";
 
     public async IAsyncEnumerable<IncomingMessage> ReadAllAsync([EnumeratorCancellation] CancellationToken cancellationToken)
@@ -25,7 +26,7 @@ public class WebSocketChannel(WebSocket ws) : IRuntimeChannel
                     if (result.Count > 0) ms.Write(buf, 0, result.Count);
                 } while (!result.EndOfMessage);
 
-                var mt = result.MessageType == WebSocketMessageType.Text
+                string mt = result.MessageType == WebSocketMessageType.Text
                     ? "text/plain" 
                     : "application/octet-stream";
                 yield return new IncomingMessage(ms.GetBuffer().AsMemory(0, (int)ms.Length), mt, EndOfMessage: true);
@@ -37,9 +38,30 @@ public class WebSocketChannel(WebSocket ws) : IRuntimeChannel
         }
     }
 
-    public ValueTask SendAsync(ReadOnlyMemory<byte> payload, string? contentType, bool endOfMessage, CancellationToken cancellationToken)
+    public async ValueTask SendAsync(ReadOnlyMemory<byte> payload, string? contentType, bool endOfMessage, CancellationToken cancellationToken)
     {
-        var type = (contentType == "text/plain") ? WebSocketMessageType.Text : WebSocketMessageType.Binary;
-        return _ws.SendAsync(payload, type, endOfMessage, cancellationToken);
+        WebSocketMessageType type = contentType == "text/plain"
+            ? WebSocketMessageType.Text
+            : WebSocketMessageType.Binary;
+
+        await _sendLock.WaitAsync(cancellationToken);
+        try
+        {
+            if (_ws.State != WebSocketState.Open)
+            {
+                return;
+            }
+
+            await _ws.SendAsync(
+                payload,
+                type,
+                endOfMessage,
+                cancellationToken
+            );
+        }
+        finally
+        {
+            _sendLock.Release();
+        }
     }
 }

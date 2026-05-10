@@ -9,6 +9,7 @@ public static class RepositoryServiceCollectionExtensions
     )
     {
         services.AddScoped<IPluginRepository, PluginRepository>();
+        services.AddScoped<IPluginEventRepository, PluginEventRepository>();
 
         return services;
     }

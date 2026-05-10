@@ -93,4 +93,9 @@ internal static partial class VstNative
         IntPtr h,
         byte[] buffer,
         uint size);
+
+    [LibraryImport(libBase)]
+    [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
+    [return: MarshalAs(UnmanagedType.I4)]
+    public static partial int VstGetProcessMode(IntPtr h);
 }

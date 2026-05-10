@@ -1,0 +1,356 @@
+using ComposeNowPlugins.Cache;
+using ComposeNowPlugins.Configurations;
+using ComposeNowPlugins.Models;
+using ComposeNowPlugins.Models.Ids;
+using ComposeNowPlugins.Repositories.Plugins;
+using ComposeNowPlugins.Wrappers;
+
+namespace ComposeNowPlugins.Services.Processing;
+
+public sealed class PluginBlockProcessor(
+    ICache cache,
+    IVstEngineFactory vstEngineFactory,
+    IPluginRepository pluginRepository,
+    IPluginEventRepository pluginEventRepository,
+    IPluginProcessingGate processingGate,
+    ILogger<PluginBlockProcessor> logger
+) : IPluginBlockProcessor
+{
+    private readonly ICache _cache = cache;
+    private readonly IVstEngineFactory _vstEngineFactory = vstEngineFactory;
+    private readonly IPluginRepository _pluginRepository = pluginRepository;
+    private readonly IPluginEventRepository _pluginEventRepository = pluginEventRepository;
+    private readonly IPluginProcessingGate _processingGate = processingGate;
+    private readonly ILogger<PluginBlockProcessor> _logger = logger;
+
+    private static readonly TimeSpan LockTtl = TimeSpan.FromSeconds(10);
+
+    public async Task<PluginBlockProcessResult> ProcessBlockAsync(
+        PluginId pluginId,
+        ulong seq,
+        int frames,
+        bool offline,
+        CancellationToken cancellationToken
+    )
+    {
+        Plugin plugin = await _pluginRepository.GetAsync(pluginId)
+            ?? throw new InvalidOperationException($"Plugin state was not found. PluginId={pluginId}");
+
+        IReadOnlyList<PluginEvent> controlEvents =
+            await _pluginEventRepository.PopControlEventsAsync(pluginId);
+
+        IReadOnlyList<PluginEvent> blockEvents =
+            await _pluginEventRepository.GetBlockEventsAsync(pluginId, seq);
+
+        List<PluginEvent> events = [..controlEvents, ..blockEvents];
+
+        events = [.. events.Where(item => BelongsToPlugin(item, pluginId))];
+
+        events.Sort((a, b) =>
+        {
+            int offsetCompare = a.Offset.CompareTo(b.Offset);
+
+            if (offsetCompare != 0)
+            {
+                return offsetCompare;
+            }
+
+            return EventPriority(a).CompareTo(EventPriority(b));
+        });
+
+        bool hasOwnInputEvents = events.Count > 0;
+        bool hasOwnActiveAudio = plugin.HasActiveAudio();
+
+        if (!offline && !hasOwnInputEvents && !hasOwnActiveAudio)
+        {
+            await _pluginEventRepository.DeleteBlockEventsAsync(pluginId, seq);
+
+            return new PluginBlockProcessResult(
+                new float[frames * Math.Max(1, plugin.Channels)],
+                ShouldSend: true
+            );
+        }
+
+        return await _processingGate.RunAsync(
+            plugin.Descriptor.Name,
+            async () =>
+            {
+                PluginBlockProcessResult result = await ProcessBlockUnderGateAsync(
+                    pluginId,
+                    plugin,
+                    events,
+                    seq,
+                    frames,
+                    offline,
+                    hasOwnInputEvents,
+                    hasOwnActiveAudio
+                );
+
+                await _pluginEventRepository.DeleteBlockEventsAsync(pluginId, seq);
+
+                return result;
+            },
+            cancellationToken
+        );
+    }
+
+    private static bool BelongsToPlugin(
+        PluginEvent pluginEvent,
+        PluginId pluginId
+    )
+    {
+        return pluginEvent.PluginId.GetValue() == pluginId.GetValue();
+    }
+
+    private async Task<PluginBlockProcessResult> ProcessBlockUnderGateAsync(
+        PluginId pluginId,
+        Plugin plugin,
+        IReadOnlyList<PluginEvent> events,
+        ulong seq,
+        int frames,
+        bool offline,
+        bool hasOwnInputEvents,
+        bool hasOwnActiveAudio
+    )
+    {
+        VstEngine vst = _vstEngineFactory.Create(plugin.Descriptor.Name);
+
+        PluginProcessingMode pluginProcessingMode = offline ? PluginProcessingMode.Offline : PluginProcessingMode.Realtime;
+        if (plugin.ProcessingMode != pluginProcessingMode)
+        {
+            plugin.SetProcessingMode(pluginProcessingMode);
+        }
+
+        if (vst.SampleRate != plugin.SampleRate ||
+            vst.BlockSize != plugin.BlockSize ||
+            vst.Channels != plugin.Channels ||
+            vst.ProcessingMode != plugin.ProcessingMode)
+        {
+            bool reconfigured = vst.Reconfigure(
+                plugin.SampleRate,
+                plugin.BlockSize,
+                plugin.Channels,
+                offline
+            );
+
+            if (!reconfigured)
+            {
+                throw new InvalidOperationException(
+                    $"VST reconfigure failed. PluginId={pluginId}, PluginName={plugin.Descriptor.Name}"
+                );
+            }
+        }
+
+        vst.SetState(plugin.State);
+
+        ApplyKnownParameters(vst, plugin);
+
+        ReadOnlyMemory<float> audio = ProcessWithEvents(
+            vst,
+            plugin,
+            events,
+            frames
+        );
+
+        bool isSilent = IsSilent(
+            audio,
+            threshold: 0.00001f
+        );
+
+        plugin.MarkAudioActivity(
+            isSilent,
+            requiredSilentBlocks: 16
+        );
+
+        plugin.SetState(vst.GetState());
+
+        await _pluginRepository.UpdateAsync(
+            pluginId,
+            plugin
+        );
+
+        bool shouldSend = offline || hasOwnInputEvents || plugin.HasActiveAudio() || !isSilent;
+        if (!shouldSend)
+        {
+            return new PluginBlockProcessResult(
+                ReadOnlyMemory<float>.Empty,
+                ShouldSend: false
+            );
+        }
+
+        return new PluginBlockProcessResult(
+            audio,
+            shouldSend
+        );
+    }
+
+    private static void ApplyKnownParameters(
+        VstEngine vst,
+        Plugin plugin
+    )
+    {
+        foreach ((uint parameterId, float value) in plugin.Parameters)
+        {
+            vst.SetParam(parameterId, value);
+        }
+    }
+
+    private static ReadOnlyMemory<float> ProcessWithEvents(
+        VstEngine vst,
+        Plugin plugin,
+        IReadOnlyList<PluginEvent> events,
+        int frames
+    )
+    {
+        if (events.Count == 0)
+        {
+            return vst.Process(frames).ToArray();
+        }
+
+        int channels = vst.Channels;
+        float[] outBuffer = new float[frames * channels];
+
+        int cursor = 0;
+
+        foreach (PluginEvent pluginEvent in events)
+        {
+            int offset = Math.Clamp(
+                pluginEvent.Offset,
+                0,
+                Math.Max(0, frames - 1)
+            );
+
+            int len = Math.Max(0, offset - cursor);
+
+            if (len > 0)
+            {
+                CopyAudioPart(
+                    vst.Process(len),
+                    outBuffer,
+                    cursor,
+                    channels
+                );
+
+                cursor += len;
+            }
+
+            ApplyEvent(vst, plugin, pluginEvent);
+        }
+
+        if (cursor < frames)
+        {
+            CopyAudioPart(
+                vst.Process(frames - cursor),
+                outBuffer,
+                cursor,
+                channels
+            );
+        }
+
+        return outBuffer;
+    }
+
+    private static void ApplyEvent(
+        VstEngine vst,
+        Plugin plugin,
+        PluginEvent pluginEvent
+    )
+    {
+        switch (pluginEvent.Type)
+        {
+            case PluginEventType.NoteOn:
+                if (pluginEvent.Pitch.HasValue)
+                {
+                    vst.NoteOn(
+                        pluginEvent.Pitch.Value,
+                        pluginEvent.Velocity ?? 1f
+                    );
+
+                    plugin.MarkNoteOn(pluginEvent.Pitch.Value);
+                }
+                break;
+
+            case PluginEventType.NoteOff:
+                if (pluginEvent.Pitch.HasValue)
+                {
+                    vst.NoteOff(pluginEvent.Pitch.Value);
+
+                    plugin.MarkNoteOff(pluginEvent.Pitch.Value);
+                }
+                break;
+
+            case PluginEventType.Param:
+                if (pluginEvent.ParameterId.HasValue &&
+                    pluginEvent.ParameterValue.HasValue)
+                {
+                    vst.SetParam(
+                        pluginEvent.ParameterId.Value,
+                        pluginEvent.ParameterValue.Value
+                    );
+
+                    plugin.SetParameter(
+                        pluginEvent.ParameterId.Value,
+                        pluginEvent.ParameterValue.Value
+                    );
+                }
+                break;
+
+            case PluginEventType.Panic:
+                for (int n = 0; n < 128; n++)
+                {
+                    vst.NoteOff(n);
+                }
+
+                plugin.Panic();
+                break;
+        }
+    }
+
+    private static void CopyAudioPart(
+        ReadOnlyMemory<float> source,
+        float[] target,
+        int frameOffset,
+        int channels
+    )
+    {
+        float[] sourceArray = source.ToArray();
+
+        Buffer.BlockCopy(
+            sourceArray,
+            0,
+            target,
+            frameOffset * channels * sizeof(float),
+            sourceArray.Length * sizeof(float)
+        );
+    }
+
+    private static bool IsSilent(
+        ReadOnlyMemory<float> audio,
+        float threshold = 0.00001f
+    )
+    {
+        ReadOnlySpan<float> span = audio.Span;
+
+        for (int i = 0; i < span.Length; i++)
+        {
+            if (Math.Abs(span[i]) > threshold)
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private static int EventPriority(PluginEvent pluginEvent)
+    {
+        return pluginEvent.Type switch
+        {
+            PluginEventType.Panic => 0,
+            PluginEventType.NoteOff => 1,
+            PluginEventType.Param => 2,
+            PluginEventType.NoteOn => 3,
+            _ => 10
+        };
+    }
+}
