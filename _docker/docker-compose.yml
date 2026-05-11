@@ -6,7 +6,7 @@ services:
       context: .
       target: dev
     image: gateway:dev
-    restart: on-failure
+    restart: always
     networks:
       - radx
     env_file:
