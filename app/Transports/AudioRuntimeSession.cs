@@ -35,8 +35,7 @@ public sealed class AudioRuntimeSession(
     private const int DefaultChannels = 2;
     private const string DefaultMode = "realtime";
 
-    private const double RealtimeDefaultLatencySeconds = 0.10;
-    private const double OfflineRenderLatencySeconds = 1.00;
+    private const int RealtimeDefaultLatencyBlocks = 2;
     private const int RenderDelayBlocks = 8;
     private const int RenderInitialPrefillBlocks = 0;
 
@@ -927,7 +926,7 @@ public sealed class AudioRuntimeSession(
 
         int latencyFrames = offline
             ? CalculateRenderDelayFrames(sampleRate, blockSize)
-            : CalculateRealtimeDelayFrames(sampleRate);
+            : CalculateRealtimeDelayFrames(blockSize);
 
         string beginMessage = offline
             ? $"render begin {_currentEpoch} {latencyFrames} {RenderInitialPrefillBlocks}"
@@ -1131,26 +1130,18 @@ public sealed class AudioRuntimeSession(
         return true;
     }
 
-    private static int CalculateRealtimeDelayFrames(int sampleRate)
+    private static int CalculateRealtimeDelayFrames(int blockSize)
     {
-        sampleRate = NormalizePositive(sampleRate, DefaultSampleRate);
-
-        int frames = (int)Math.Round(sampleRate * RealtimeDefaultLatencySeconds);
+        blockSize = NormalizePositive(blockSize, DefaultBlockSize);
+        int frames = blockSize * RealtimeDefaultLatencyBlocks;
 
         // Чтобы не получить слишком маленький prebuffer на странных sample rate.
-        return Math.Max(256, frames);
+        return Math.Max(128, frames);
     }
 
     private static int CalculateRenderDelayFrames(int sampleRate, int blockSize)
     {
-        sampleRate = NormalizePositive(sampleRate, DefaultSampleRate);
-        blockSize = NormalizePositive(blockSize, DefaultBlockSize);
-
-        int frames = (int)Math.Round(sampleRate * OfflineRenderLatencySeconds);
-
-        // Offline должен заранее готовить больший запас, чем realtime.
-        // Но RenderInitialPrefillBlocks остаётся 0: сервер не должен забегать вперёд по блокам.
-        return Math.Max(blockSize, frames);
+        return 0;
     }
 
     private static int NormalizePositive(
