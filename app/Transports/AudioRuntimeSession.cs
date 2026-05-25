@@ -1,4 +1,5 @@
 using System.Buffers.Binary;
+using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Globalization;
 using System.Text;
@@ -29,8 +30,15 @@ public sealed class AudioRuntimeSession(
     private readonly IPluginEventRepository _pluginEventRepository = pluginEventRepository;
     private readonly IPluginBlockProcessor _pluginBlockProcessor = pluginBlockProcessor;
 
+    private const int DefaultSampleRate = 44100;
+    private const int DefaultBlockSize = 512;
     private const int DefaultChannels = 2;
     private const string DefaultMode = "realtime";
+
+    private const double RealtimeDefaultLatencySeconds = 0.10;
+    private const double OfflineRenderLatencySeconds = 1.00;
+    private const int RenderDelayBlocks = 8;
+    private const int RenderInitialPrefillBlocks = 0;
 
     private record Evt(int Type, int Pitch, float Vel, int Offs);
 
@@ -44,69 +52,11 @@ public sealed class AudioRuntimeSession(
     private TaskCompletionSource<string>? _pluginCacheRenewTcs;
 
     private long _lastProcessedSeq = -1;
+    private volatile bool _offlineMode;
+    private readonly ConcurrentDictionary<ulong, int> _offlineBlockFrames = new();
 
-    private static bool TryParseEvt1(
-        ReadOnlySpan<byte> span,
-        out ulong seq,
-        out int blockFrames,
-        out List<Evt> evts
-    )
-    {
-        evts = [];
-        seq = 0;
-        blockFrames = 0;
-
-        // min: 4(magic) + 8(seq) + 4(blockFrames) + 4(cnt) = 20
-        if (span.Length < 20)
-        {
-            return false;
-        }
-
-        if (!(span[0] == 'E' && span[1] == 'V' && span[2] == 'T' && span[3] == '1'))
-        {
-            return false;
-        }
-
-        seq = BinaryPrimitives.ReadUInt64LittleEndian(span.Slice(4, 8));
-        blockFrames = BinaryPrimitives.ReadInt32LittleEndian(span.Slice(12, 4));
-        uint cnt = BinaryPrimitives.ReadUInt32LittleEndian(span.Slice(16, 4));
-
-        if (blockFrames <= 0)
-        {
-            return false;
-        }
-
-        int pos = 20;
-        const int entrySize = 12;
-
-        if (span.Length < pos + entrySize * cnt)
-        {
-            return false;
-        }
-
-        for (uint i = 0; i < cnt; i++, pos += entrySize)
-        {
-            ushort type = BinaryPrimitives.ReadUInt16LittleEndian(span.Slice(pos + 0, 2));
-            ushort pitch = BinaryPrimitives.ReadUInt16LittleEndian(span.Slice(pos + 2, 2));
-
-            float vel = BitConverter.Int32BitsToSingle(
-                BinaryPrimitives.ReadInt32LittleEndian(span.Slice(pos + 4, 4))
-            );
-
-            ushort offs = BinaryPrimitives.ReadUInt16LittleEndian(span.Slice(pos + 8, 2));
-
-            evts.Add(new Evt(type, pitch, vel, offs));
-        }
-
-        // По offset, затем NoteOff раньше NoteOn при одинаковом offset.
-        evts.Sort((a, b) =>
-            a.Offs != b.Offs
-                ? a.Offs.CompareTo(b.Offs)
-                : a.Type.CompareTo(b.Type)
-        );
-
-        return true;
-    }
+    private TaskCompletionSource<ulong>? _renderReadyTcs;
+    private ulong _currentEpoch;
 
     public async Task RunAsync(
         IRuntimeChannel ch,
@@ -125,9 +75,9 @@ public sealed class AudioRuntimeSession(
             sessionCt
         );
 
-        int sampleRate = plugin.SampleRate;
-        int blockSize = plugin.BlockSize;
-        int channels = plugin.Channels > 0 ? plugin.Channels : DefaultChannels;
+        int sampleRate = NormalizePositive(plugin.SampleRate, DefaultSampleRate);
+        int blockSize = NormalizePositive(plugin.BlockSize, DefaultBlockSize);
+        int channels = NormalizePositive(plugin.Channels, DefaultChannels);
         string mode = DefaultMode;
 
         var helloTcs = new TaskCompletionSource<HelloOptions>(
@@ -144,7 +94,6 @@ public sealed class AudioRuntimeSession(
                     ch,
                     helloTcs,
                     creditSignal,
-                    () => Interlocked.Increment(ref credits),
                     blocks => Interlocked.Add(ref credits, blocks),
                     sessionCt
                 );
@@ -169,10 +118,12 @@ public sealed class AudioRuntimeSession(
 
             if (hello is not null)
             {
-                sampleRate = hello.SampleRate;
-                blockSize = hello.BlockSize;
-                channels = hello.Channels;
-                mode = hello.Mode;
+                sampleRate = NormalizePositive(hello.SampleRate, DefaultSampleRate);
+                blockSize = NormalizePositive(hello.BlockSize, DefaultBlockSize);
+                channels = NormalizePositive(hello.Channels, DefaultChannels);
+                mode = string.IsNullOrWhiteSpace(hello.Mode)
+                    ? DefaultMode
+                    : hello.Mode;
 
                 _log.LogInformation(
                     "Hello received. PluginId={PluginId}, SampleRate={SampleRate}, BlockSize={BlockSize}, Channels={Channels}, Mode={Mode}",
@@ -186,8 +137,12 @@ public sealed class AudioRuntimeSession(
             else
             {
                 _log.LogWarning(
-                    "Hello was not received. PluginId={PluginId}",
-                    _pluginId
+                    "Hello was not received. PluginId={PluginId}. Using cached/default audio configuration. SampleRate={SampleRate}, BlockSize={BlockSize}, Channels={Channels}, Mode={Mode}",
+                    _pluginId,
+                    sampleRate,
+                    blockSize,
+                    channels,
+                    mode
                 );
             }
 
@@ -196,6 +151,10 @@ public sealed class AudioRuntimeSession(
                 "offline",
                 StringComparison.OrdinalIgnoreCase
             );
+
+            _offlineMode = offline;
+            Volatile.Write(ref _lastProcessedSeq, -1);
+            _offlineBlockFrames.Clear();
 
             plugin.SetAudioConfiguration(
                 sampleRate,
@@ -331,7 +290,6 @@ public sealed class AudioRuntimeSession(
         IRuntimeChannel ch,
         TaskCompletionSource<HelloOptions> helloTcs,
         SemaphoreSlim creditSignal,
-        Action addSingleCredit,
         Action<int> addCredits,
         CancellationToken ct
     )
@@ -373,7 +331,8 @@ public sealed class AudioRuntimeSession(
                 await SaveEvt1EventsAsync(
                     evtSeq,
                     blockFrames,
-                    evtList
+                    evtList,
+                    _offlineMode
                 );
 
                 continue;
@@ -390,12 +349,17 @@ public sealed class AudioRuntimeSession(
     private async Task SaveEvt1EventsAsync(
         ulong seq,
         int blockFrames,
-        List<Evt> events
+        List<Evt> events,
+        bool offline
     )
     {
         long lastProcessedSeq = Volatile.Read(ref _lastProcessedSeq);
+        bool isLate = lastProcessedSeq >= 0 && seq <= (ulong)lastProcessedSeq;
 
-        bool isLate = seq <= (ulong)Math.Max(0, lastProcessedSeq);
+        if (offline && !isLate)
+        {
+            _offlineBlockFrames[seq] = blockFrames;
+        }
 
         foreach (Evt item in events)
         {
@@ -418,8 +382,22 @@ public sealed class AudioRuntimeSession(
 
             if (isLate)
             {
+                if (offline)
+                {
+                    _log.LogWarning(
+                        "Late offline EVT1 event dropped. PluginId={PluginId}, EventSeq={EventSeq}, LastProcessedSeq={LastProcessedSeq}, Type={Type}, Pitch={Pitch}",
+                        _pluginId.GetValue(),
+                        seq,
+                        lastProcessedSeq,
+                        item.Type,
+                        item.Pitch
+                    );
+
+                    continue;
+                }
+
                 _log.LogWarning(
-                    "Late EVT1 event. Applying as control event. PluginId={PluginId}, EventSeq={EventSeq}, LastProcessedSeq={LastProcessedSeq}, Type={Type}, Pitch={Pitch}",
+                    "Late realtime EVT1 event. Applying as control event. PluginId={PluginId}, EventSeq={EventSeq}, LastProcessedSeq={LastProcessedSeq}, Type={Type}, Pitch={Pitch}",
                     _pluginId.GetValue(),
                     seq,
                     lastProcessedSeq,
@@ -431,15 +409,15 @@ public sealed class AudioRuntimeSession(
                     _pluginId,
                     pluginEvent
                 );
+
+                continue;
             }
-            else
-            {
-                await _pluginEventRepository.AddBlockEventAsync(
-                    _pluginId,
-                    seq,
-                    pluginEvent
-                );
-            }
+
+            await _pluginEventRepository.AddBlockEventAsync(
+                _pluginId,
+                seq,
+                pluginEvent
+            );
         }
     }
 
@@ -455,6 +433,11 @@ public sealed class AudioRuntimeSession(
         }
 
         if (TryHandlePluginCacheRenewConfirmation(text))
+        {
+            return;
+        }
+
+        if (TryHandleAudioReady(text))
         {
             return;
         }
@@ -699,7 +682,11 @@ public sealed class AudioRuntimeSession(
             : (int)blocks;
 
         addCredits(creditsToAdd);
-        creditSignal.Release();
+
+        for (int i = 0; i < creditsToAdd; i++)
+        {
+            creditSignal.Release();
+        }
 
         return true;
     }
@@ -730,6 +717,72 @@ public sealed class AudioRuntimeSession(
             out blockFrames,
             out events
         );
+    }
+
+    private static bool TryParseEvt1(
+        ReadOnlySpan<byte> span,
+        out ulong seq,
+        out int blockFrames,
+        out List<Evt> evts
+    )
+    {
+        evts = [];
+        seq = 0;
+        blockFrames = 0;
+
+        if (span.Length < 20)
+        {
+            return false;
+        }
+
+        if (!(span[0] == 'E' && span[1] == 'V' && span[2] == 'T' && span[3] == '1'))
+        {
+            return false;
+        }
+
+        seq = BinaryPrimitives.ReadUInt64LittleEndian(span.Slice(4, 8));
+        blockFrames = BinaryPrimitives.ReadInt32LittleEndian(span.Slice(12, 4));
+        uint cnt = BinaryPrimitives.ReadUInt32LittleEndian(span.Slice(16, 4));
+
+        if (blockFrames <= 0)
+        {
+            return false;
+        }
+
+        int pos = 20;
+        const int entrySize = 12;
+
+        if (cnt > int.MaxValue / entrySize)
+        {
+            return false;
+        }
+
+        if (span.Length < pos + entrySize * (int)cnt)
+        {
+            return false;
+        }
+
+        for (uint i = 0; i < cnt; i++, pos += entrySize)
+        {
+            ushort type = BinaryPrimitives.ReadUInt16LittleEndian(span.Slice(pos + 0, 2));
+            ushort pitch = BinaryPrimitives.ReadUInt16LittleEndian(span.Slice(pos + 2, 2));
+
+            float vel = BitConverter.Int32BitsToSingle(
+                BinaryPrimitives.ReadInt32LittleEndian(span.Slice(pos + 4, 4))
+            );
+
+            ushort offs = BinaryPrimitives.ReadUInt16LittleEndian(span.Slice(pos + 8, 2));
+
+            evts.Add(new Evt(type, pitch, vel, offs));
+        }
+
+        evts.Sort((a, b) =>
+            a.Offs != b.Offs
+                ? a.Offs.CompareTo(b.Offs)
+                : a.Type.CompareTo(b.Type)
+        );
+
+        return true;
     }
 
     private async Task RunPluginCacheLeaseLoopAsync(
@@ -852,6 +905,10 @@ public sealed class AudioRuntimeSession(
         CancellationToken ct
     )
     {
+        sampleRate = NormalizePositive(sampleRate, DefaultSampleRate);
+        blockSize = NormalizePositive(blockSize, DefaultBlockSize);
+        channels = NormalizePositive(channels, DefaultChannels);
+
         TimeSpan period = TimeSpan.FromSeconds(
             (double)blockSize / sampleRate
         );
@@ -861,6 +918,85 @@ public sealed class AudioRuntimeSession(
 
         ulong seq = 0;
         ulong ts = 0;
+
+        _currentEpoch = CreateEpoch();
+
+        _renderReadyTcs = new TaskCompletionSource<ulong>(
+            TaskCreationOptions.RunContinuationsAsynchronously
+        );
+
+        int latencyFrames = offline
+            ? CalculateRenderDelayFrames(sampleRate, blockSize)
+            : CalculateRealtimeDelayFrames(sampleRate);
+
+        string beginMessage = offline
+            ? $"render begin {_currentEpoch} {latencyFrames} {RenderInitialPrefillBlocks}"
+            : $"realtime begin {_currentEpoch} {latencyFrames}";
+
+        await ch.SendAsync(
+            Encoding.UTF8.GetBytes(beginMessage),
+            "text/plain",
+            true,
+            ct
+        );
+
+        _log.LogInformation(
+            "Audio session begin sent. PluginId={PluginId}, Epoch={Epoch}, Mode={Mode}, SampleRate={SampleRate}, BlockSize={BlockSize}, Channels={Channels}, LatencyFrames={LatencyFrames}",
+            _pluginId.GetValue(),
+            _currentEpoch,
+            offline ? "offline" : "realtime",
+            sampleRate,
+            blockSize,
+            channels,
+            latencyFrames
+        );
+
+        TimeSpan readyTimeout = offline
+            ? TimeSpan.FromSeconds(2)
+            : TimeSpan.FromMilliseconds(100);
+
+        bool readyConfirmed = false;
+        try
+        {
+            await _renderReadyTcs.Task.WaitAsync(
+                readyTimeout,
+                ct
+            );
+
+            readyConfirmed = true;
+        }
+        catch (TimeoutException)
+        {
+            readyConfirmed = false;
+        }
+
+        if (readyConfirmed)
+        {
+            _log.LogInformation(
+                "Audio session ready confirmed. PluginId={PluginId}, Epoch={Epoch}, Mode={Mode}",
+                _pluginId.GetValue(),
+                _currentEpoch,
+                offline ? "offline" : "realtime"
+            );
+        }
+        else if (offline)
+        {
+            _log.LogWarning(
+                "Offline audio session ready confirmation timeout. Continuing may produce broken render. PluginId={PluginId}, Epoch={Epoch}",
+                _pluginId.GetValue(),
+                _currentEpoch
+            );
+        }
+        else
+        {
+            _log.LogDebug(
+                "Realtime ready confirmation timeout. Continuing. PluginId={PluginId}, Epoch={Epoch}",
+                _pluginId.GetValue(),
+                _currentEpoch
+            );
+        }
+
+        ulong epoch = _currentEpoch;
 
         while (!ct.IsCancellationRequested)
         {
@@ -873,6 +1009,22 @@ public sealed class AudioRuntimeSession(
             }
 
             int framesForBlock = blockSize;
+
+            if (offline &&
+                !_offlineBlockFrames.TryRemove(seq, out framesForBlock))
+            {
+                framesForBlock = blockSize;
+
+                _log.LogWarning(
+                    "Offline block size marker was not found. Falling back to configured block size. PluginId={PluginId}, Seq={Seq}, BlockSize={BlockSize}",
+                    _pluginId.GetValue(),
+                    seq,
+                    blockSize
+                );
+            }
+
+            framesForBlock = NormalizePositive(framesForBlock, blockSize);
+
             PluginBlockProcessResult result = await _pluginBlockProcessor.ProcessBlockAsync(
                 _pluginId,
                 seq,
@@ -880,11 +1032,13 @@ public sealed class AudioRuntimeSession(
                 offline,
                 ct
             );
+
             Volatile.Write(ref _lastProcessedSeq, (long)seq);
 
             if (result.ShouldSend)
             {
-                byte[] frame = Aud0.Pack(
+                byte[] frame = Aud1.Pack(
+                    epoch,
                     seq,
                     ts,
                     sampleRate,
@@ -917,17 +1071,16 @@ public sealed class AudioRuntimeSession(
 
                 long lagTicks = now - next;
 
-                // Если отстали больше чем на 2 блока, не пытаемся "догонять" пачкой.
                 if (lagTicks > periodTicks * 2)
                 {
                     next = now + periodTicks;
 
-                    // _log.LogWarning(
-                    //     "Realtime processing lag corrected. PluginId={PluginId}, Seq={Seq}, LagMs={LagMs:F2}",
-                    //     _pluginId.GetValue(),
-                    //     seq,
-                    //     lagTicks * 1000.0 / freq
-                    // );
+                    _log.LogDebug(
+                        "Realtime processing lag corrected. PluginId={PluginId}, Seq={Seq}, LagMs={LagMs:F2}",
+                        _pluginId.GetValue(),
+                        seq,
+                        lagTicks * 1000.0 / freq
+                    );
                 }
 
                 TimeSpan delay = TimeSpan.FromSeconds(
@@ -978,10 +1131,82 @@ public sealed class AudioRuntimeSession(
         return true;
     }
 
+    private static int CalculateRealtimeDelayFrames(int sampleRate)
+    {
+        sampleRate = NormalizePositive(sampleRate, DefaultSampleRate);
+
+        int frames = (int)Math.Round(sampleRate * RealtimeDefaultLatencySeconds);
+
+        // Чтобы не получить слишком маленький prebuffer на странных sample rate.
+        return Math.Max(256, frames);
+    }
+
+    private static int CalculateRenderDelayFrames(int sampleRate, int blockSize)
+    {
+        sampleRate = NormalizePositive(sampleRate, DefaultSampleRate);
+        blockSize = NormalizePositive(blockSize, DefaultBlockSize);
+
+        int frames = (int)Math.Round(sampleRate * OfflineRenderLatencySeconds);
+
+        // Offline должен заранее готовить больший запас, чем realtime.
+        // Но RenderInitialPrefillBlocks остаётся 0: сервер не должен забегать вперёд по блокам.
+        return Math.Max(blockSize, frames);
+    }
+
+    private static int NormalizePositive(
+        int value,
+        int fallback
+    )
+    {
+        return value > 0 ? value : fallback;
+    }
+
+    private static ulong CreateEpoch()
+    {
+        long value = Random.Shared.NextInt64(
+            1,
+            long.MaxValue
+        );
+
+        return unchecked((ulong)value);
+    }
+
     private sealed record HelloOptions(
         int SampleRate,
         int BlockSize,
         int Channels,
         string Mode
     );
+
+    private bool TryHandleAudioReady(string text)
+    {
+        const string renderPrefix = "render ready ";
+        const string realtimePrefix = "realtime ready ";
+
+        string? epochText;
+        if (text.StartsWith(renderPrefix, StringComparison.OrdinalIgnoreCase))
+        {
+            epochText = text[renderPrefix.Length..].Trim();
+        }
+        else if (text.StartsWith(realtimePrefix, StringComparison.OrdinalIgnoreCase))
+        {
+            epochText = text[realtimePrefix.Length..].Trim();
+        }
+        else
+        {
+            return false;
+        }
+
+        if (!ulong.TryParse(epochText, out ulong epoch))
+        {
+            return true;
+        }
+
+        if (epoch == _currentEpoch)
+        {
+            _renderReadyTcs?.TrySetResult(epoch);
+        }
+
+        return true;
+    }
 }
