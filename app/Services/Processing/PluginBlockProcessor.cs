@@ -46,17 +46,12 @@ public sealed class PluginBlockProcessor(
 
         events = [.. events.Where(item => BelongsToPlugin(item, pluginId))];
 
-        events.Sort((a, b) =>
-        {
-            int offsetCompare = a.Offset.CompareTo(b.Offset);
-
-            if (offsetCompare != 0)
-            {
-                return offsetCompare;
-            }
-
-            return EventPriority(a).CompareTo(EventPriority(b));
-        });
+        events = [.. events
+            .Select((item, index) => new { Event = item, Index = index })
+            .OrderBy(item => item.Event.Offset)
+            .ThenBy(item => EventPriority(item.Event))
+            .ThenBy(item => item.Index)
+            .Select(item => item.Event)];
 
         bool hasOwnInputEvents = events.Count > 0;
         bool hasOwnActiveAudio = plugin.HasActiveAudio();
@@ -344,6 +339,11 @@ public sealed class PluginBlockProcessor(
 
     private static int EventPriority(PluginEvent pluginEvent)
     {
+        if (!pluginEvent.Seq.HasValue)
+        {
+            return 0;
+        }
+
         return pluginEvent.Type switch
         {
             PluginEventType.Panic => 0,
