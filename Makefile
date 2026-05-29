@@ -10,6 +10,12 @@ restart:
 	make down
 	make up
 
+restore:
+	find app -maxdepth 1 -type f -name "*.csproj" -exec dotnet restore {} \;
+
+rebuild:
+	cd _docker && docker compose --env-file ../.env build
+
 shell:
 	cd _docker && docker compose --env-file ../.env exec vst-host bash
 

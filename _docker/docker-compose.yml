@@ -19,11 +19,11 @@ services:
     ports:
       - "${ASPNETCORE_PORT}:5001"
     volumes:
+      - ../container/obj:/app/obj
+      - ../container/bin:/app/bin
       - ../app:/app
       - ../vst_builds:/plugins:ro
       - ../logs:/logs
-      - /app/obj
-      - /app/bin
 
   # worker:
   #   build:
