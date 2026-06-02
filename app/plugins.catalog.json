@@ -5,6 +5,24 @@
       "name": "SineSynth",
       "pluginPath": "SineSynthHeadless/VST3/Release/SineSynth.vst3",
       "enabled": true
+    },
+    {
+      "type": "Synth",
+      "name": "Piano",
+      "pluginPath": "PianoHeadless/VST3/Release/Piano.vst3",
+      "enabled": true
+    },
+    {
+      "type": "Effect",
+      "name": "Delay",
+      "pluginPath": "DelayHeadless/VST3/Release/Delay.vst3",
+      "enabled": true
+    },
+    {
+      "type": "Effect",
+      "name": "Reverb",
+      "pluginPath": "ReverbHeadless/VST3/Release/Reverb.vst3",
+      "enabled": true
     }
   ]
 }

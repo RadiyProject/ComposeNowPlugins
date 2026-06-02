@@ -11,15 +11,15 @@ public sealed class VstEngineFactory(IPluginCatalog pluginCatalog, ILoggerFactor
     private readonly ILoggerFactory _loggerFactory = loggerFactory;
     private readonly IConfiguration _cfg = cfg;
 
-    public VstEngine Create(string pluginName)
+    public VstEngine Create(string pluginName, int sampleRate, int blockSize, int channels)
     {
         return _vstEngines.GetOrAdd(
             pluginName,
-            CreateNew
+            _ => CreateNew(pluginName, sampleRate, blockSize, channels)
         );
     }
 
-    private VstEngine CreateNew(string pluginName)
+    private VstEngine CreateNew(string pluginName, int sampleRate, int blockSize, int channels)
     {
         var descriptor = _pluginCatalog.GetRequired(pluginName)
             ?? throw new InvalidOperationException($"Plugin with name '{pluginName}' is not registered or disabled.");
@@ -29,7 +29,10 @@ public sealed class VstEngineFactory(IPluginCatalog pluginCatalog, ILoggerFactor
 
         return new VstEngine(
             $"{vstPath}/{descriptor.PluginPath}",
-            _loggerFactory.CreateLogger<VstEngine>()
+            _loggerFactory.CreateLogger<VstEngine>(),
+            sampleRate,
+            blockSize,
+            channels
         );
     }
 }

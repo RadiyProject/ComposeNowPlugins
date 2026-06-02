@@ -9,6 +9,7 @@ public interface IPluginBlockProcessor
         ulong seq,
         int frames,
         bool offline,
+        ReadOnlyMemory<float>? inputAudio,
         CancellationToken cancellationToken
     );
 }

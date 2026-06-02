@@ -18,10 +18,10 @@ internal static partial class VstNative
         if (!string.Equals(libraryName, libBase, StringComparison.Ordinal))
             return IntPtr.Zero;
 
-        // 1) Берём базу из ENV/конфига (например: /plugins/SineSynthHeadless/lib/Release)
+        // 1) Берём базу из ENV/конфига (например: /plugins/VstHostCapi/lib/Release)
         var baseDir = "/plugins/" + (
             Environment.GetEnvironmentVariable("VST_HOST_LIB_DIR")
-            ?? "SineSynthHeadless") + "/lib/Release";//TODO: вынести в отдельный проект с хостом
+            ?? "VstHostCapi") + "/lib/Release";
 
         // 2) Подбираем имя под ОС
         var fileName = $"lib{libBase}.so";
@@ -69,7 +69,16 @@ internal static partial class VstNative
     [LibraryImport(libBase)]
     [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
     [return: MarshalAs(UnmanagedType.I4)]
-    public static partial int VstProcess(IntPtr h, [Out][MarshalAs(UnmanagedType.LPArray, SizeParamIndex = 2)] float[] outInterleaved, int frames);
+    public static unsafe partial int VstProcess(IntPtr h, float* outInterleaved, int frames);
+
+    [LibraryImport(libBase)]
+    [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
+    [return: MarshalAs(UnmanagedType.I4)]
+    public static unsafe partial int VstProcessReplacing(
+        IntPtr h,
+        float* inInterleaved,
+        float* outInterleaved,
+        int frames);
 
     [LibraryImport(libBase)]
     [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]

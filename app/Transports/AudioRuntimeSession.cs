@@ -3,6 +3,7 @@ using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Globalization;
 using System.Text;
+using ComposeNowPlugins.Configurations;
 using ComposeNowPlugins.Models;
 using ComposeNowPlugins.Models.Ids;
 using ComposeNowPlugins.Repositories;
@@ -40,6 +41,7 @@ public sealed class AudioRuntimeSession(
     private const int RenderInitialPrefillBlocks = 0;
 
     private record Evt(int Type, int Pitch, float Vel, int Offs);
+    private sealed record AudioInputBlock(int Frames, int Channels, float[] Audio);
 
     private static readonly TimeSpan PluginCacheTtl = TimeSpan.FromMinutes(5);
     private static readonly TimeSpan PluginCacheRenewBefore = TimeSpan.FromSeconds(30);
@@ -53,6 +55,7 @@ public sealed class AudioRuntimeSession(
     private long _lastProcessedSeq = -1;
     private volatile bool _offlineMode;
     private readonly ConcurrentDictionary<ulong, int> _offlineBlockFrames = new();
+    private readonly ConcurrentDictionary<ulong, AudioInputBlock> _inputBlocks = new();
 
     private TaskCompletionSource<ulong>? _renderReadyTcs;
     private ulong _currentEpoch;
@@ -154,6 +157,7 @@ public sealed class AudioRuntimeSession(
             _offlineMode = offline;
             Volatile.Write(ref _lastProcessedSeq, -1);
             _offlineBlockFrames.Clear();
+            _inputBlocks.Clear();
 
             plugin.SetAudioConfiguration(
                 sampleRate,
@@ -172,6 +176,7 @@ public sealed class AudioRuntimeSession(
                 blockSize,
                 channels,
                 offline,
+                plugin.Descriptor.Type == PluginType.EFFECT,
                 () => Volatile.Read(ref credits),
                 () => Interlocked.Decrement(ref credits),
                 creditSignal,
@@ -189,6 +194,14 @@ public sealed class AudioRuntimeSession(
             catch (OperationCanceledException)
             {
                 // Нормальное завершение при закрытии соединения.
+            }
+            catch (System.Net.WebSockets.WebSocketException exception)
+            {
+                _log.LogDebug(
+                    exception,
+                    "Audio input reader websocket closed. PluginId={PluginId}",
+                    _pluginId
+                );
             }
             catch (Exception exception)
             {
@@ -333,6 +346,22 @@ public sealed class AudioRuntimeSession(
                     evtList,
                     _offlineMode
                 );
+
+                continue;
+            }
+
+            if (TryParseAin1Message(
+                span,
+                out ulong audioSeq,
+                out AudioInputBlock? inputBlock
+            ) && inputBlock is not null)
+            {
+                _inputBlocks[audioSeq] = inputBlock;
+
+                if (_offlineMode)
+                {
+                    _offlineBlockFrames[audioSeq] = inputBlock.Frames;
+                }
 
                 continue;
             }
@@ -718,6 +747,72 @@ public sealed class AudioRuntimeSession(
         );
     }
 
+    private static bool TryParseAin1Message(
+        ReadOnlySpan<byte> span,
+        out ulong seq,
+        out AudioInputBlock? inputBlock
+    )
+    {
+        seq = 0;
+        inputBlock = null;
+
+        if (span.Length < 20 ||
+            span[0] != 'A' ||
+            span[1] != 'I' ||
+            span[2] != 'N' ||
+            span[3] != '1')
+        {
+            return false;
+        }
+
+        seq = BinaryPrimitives.ReadUInt64LittleEndian(span.Slice(4, 8));
+        int frames = BinaryPrimitives.ReadInt32LittleEndian(span.Slice(12, 4));
+        int channels = BinaryPrimitives.ReadInt32LittleEndian(span.Slice(16, 4));
+
+        if (frames <= 0 || channels <= 0)
+        {
+            return false;
+        }
+
+        int samples;
+        try
+        {
+            samples = checked(frames * channels);
+        }
+        catch (OverflowException)
+        {
+            return false;
+        }
+
+        int bytes;
+        try
+        {
+            bytes = checked(samples * sizeof(float));
+        }
+        catch (OverflowException)
+        {
+            return false;
+        }
+
+        if (span.Length < 20 + bytes)
+        {
+            return false;
+        }
+
+        float[] audio = new float[samples];
+        ReadOnlySpan<byte> payload = span.Slice(20, bytes);
+
+        for (int i = 0; i < samples; ++i)
+        {
+            audio[i] = BitConverter.Int32BitsToSingle(
+                BinaryPrimitives.ReadInt32LittleEndian(payload.Slice(i * sizeof(float), sizeof(float)))
+            );
+        }
+
+        inputBlock = new AudioInputBlock(frames, channels, audio);
+        return true;
+    }
+
     private static bool TryParseEvt1(
         ReadOnlySpan<byte> span,
         out ulong seq,
@@ -898,6 +993,7 @@ public sealed class AudioRuntimeSession(
         int blockSize,
         int channels,
         bool offline,
+        bool waitForInputAudio,
         Func<int> getCredits,
         Action decrementCredits,
         SemaphoreSlim creditSignal,
@@ -1024,11 +1120,41 @@ public sealed class AudioRuntimeSession(
 
             framesForBlock = NormalizePositive(framesForBlock, blockSize);
 
+            AudioInputBlock? inputBlock = null;
+            if (waitForInputAudio)
+            {
+                long inputDeadline = offline
+                    ? Stopwatch.GetTimestamp() + (long)(TimeSpan.FromSeconds(10).TotalSeconds * Stopwatch.Frequency)
+                    : long.MaxValue;
+
+                while (!_inputBlocks.TryRemove(seq, out inputBlock))
+                {
+                    if (Stopwatch.GetTimestamp() >= inputDeadline)
+                    {
+                        break;
+                    }
+
+                    await Task.Delay(1, ct);
+                }
+            }
+            else
+            {
+                _inputBlocks.TryRemove(seq, out inputBlock);
+            }
+
+            if (inputBlock is not null)
+            {
+                framesForBlock = NormalizePositive(inputBlock.Frames, framesForBlock);
+            }
+
             PluginBlockProcessResult result = await _pluginBlockProcessor.ProcessBlockAsync(
                 _pluginId,
                 seq,
                 framesForBlock,
                 offline,
+                inputBlock is not null
+                    ? new ReadOnlyMemory<float>(inputBlock.Audio)
+                    : null,
                 ct
             );
 
@@ -1061,7 +1187,7 @@ public sealed class AudioRuntimeSession(
             seq++;
             ts += (ulong)framesForBlock;
 
-            if (!offline)
+            if (!offline && !waitForInputAudio)
             {
                 long now = Stopwatch.GetTimestamp();
                 long periodTicks = (long)(period.TotalSeconds * freq);

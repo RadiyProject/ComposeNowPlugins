@@ -61,9 +61,9 @@ public sealed class VstEngine : IAsyncDisposable
     // генерируем следующий аудио-чанк (interleaved float32)
     public ReadOnlyMemory<float> Process()
     {
-        var n = VstNative.VstProcess(_host, _tmp, _blockSize);
-        return new ReadOnlyMemory<float>(_tmp, 0, n * _channels);
+        return Process(_blockSize);
     }
+
     public ReadOnlyMemory<float> Process(int frames)
     {
         if (frames <= 0) return ReadOnlyMemory<float>.Empty;
@@ -73,8 +73,41 @@ public sealed class VstEngine : IAsyncDisposable
         if (_tmp.Length < need)
             _tmp = new float[need];
 
-        var n = VstNative.VstProcess(_host, _tmp, frames);
+        int n;
+        unsafe
+        {
+            fixed (float* outPtr = _tmp)
+            {
+                n = VstNative.VstProcess(_host, outPtr, frames);
+            }
+        }
+
         // VstProcess возвращает фактически отрисованные фреймы (<= frames)
+        return new ReadOnlyMemory<float>(_tmp, 0, n * _channels);
+    }
+
+    // обработка эффекта: interleaved float32 input -> interleaved float32 output
+    public ReadOnlyMemory<float> Process(ReadOnlySpan<float> input, int frames)
+    {
+        if (frames <= 0) return ReadOnlyMemory<float>.Empty;
+
+        int need = frames * _channels;
+        if (_tmp.Length < need)
+            _tmp = new float[need];
+
+        var inBuffer = new float[need];
+        input[..Math.Min(input.Length, need)].CopyTo(inBuffer);
+
+        int n;
+        unsafe
+        {
+            fixed (float* inPtr = inBuffer)
+            fixed (float* outPtr = _tmp)
+            {
+                n = VstNative.VstProcessReplacing(_host, inPtr, outPtr, frames);
+            }
+        }
+
         return new ReadOnlyMemory<float>(_tmp, 0, n * _channels);
     }
 

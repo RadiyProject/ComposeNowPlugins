@@ -30,6 +30,7 @@ public sealed class PluginBlockProcessor(
         ulong seq,
         int frames,
         bool offline,
+        ReadOnlyMemory<float>? inputAudio,
         CancellationToken cancellationToken
     )
     {
@@ -55,8 +56,9 @@ public sealed class PluginBlockProcessor(
 
         bool hasOwnInputEvents = events.Count > 0;
         bool hasOwnActiveAudio = plugin.HasActiveAudio();
+        bool hasInputAudio = inputAudio.HasValue && inputAudio.Value.Length > 0;
 
-        if (!offline && !hasOwnInputEvents && !hasOwnActiveAudio)
+        if (!offline && !hasOwnInputEvents && !hasOwnActiveAudio && !hasInputAudio)
         {
             await _pluginEventRepository.DeleteBlockEventsAsync(pluginId, seq);
 
@@ -78,7 +80,8 @@ public sealed class PluginBlockProcessor(
                     frames,
                     offline,
                     hasOwnInputEvents,
-                    hasOwnActiveAudio
+                    hasOwnActiveAudio,
+                    inputAudio
                 );
 
                 await _pluginEventRepository.DeleteBlockEventsAsync(pluginId, seq);
@@ -105,16 +108,24 @@ public sealed class PluginBlockProcessor(
         int frames,
         bool offline,
         bool hasOwnInputEvents,
-        bool hasOwnActiveAudio
+        bool hasOwnActiveAudio,
+        ReadOnlyMemory<float>? inputAudio
     )
     {
-        VstEngine vst = _vstEngineFactory.Create(plugin.Descriptor.Name);
+        VstEngine vst = _vstEngineFactory.Create(
+            plugin.Descriptor.Name,
+            plugin.SampleRate,
+            plugin.BlockSize,
+            plugin.Channels
+        );
 
         PluginProcessingMode pluginProcessingMode = offline ? PluginProcessingMode.Offline : PluginProcessingMode.Realtime;
         if (plugin.ProcessingMode != pluginProcessingMode)
         {
             plugin.SetProcessingMode(pluginProcessingMode);
         }
+
+        ApplyDefaultParameters(plugin);
 
         if (vst.SampleRate != plugin.SampleRate ||
             vst.BlockSize != plugin.BlockSize ||
@@ -144,7 +155,8 @@ public sealed class PluginBlockProcessor(
             vst,
             plugin,
             events,
-            frames
+            frames,
+            inputAudio
         );
 
         bool isSilent = IsSilent(
@@ -164,7 +176,7 @@ public sealed class PluginBlockProcessor(
             plugin
         );
 
-        bool shouldSend = offline || hasOwnInputEvents || plugin.HasActiveAudio() || !isSilent;
+        bool shouldSend = offline || hasOwnInputEvents || inputAudio.HasValue || plugin.HasActiveAudio() || !isSilent;
         if (!shouldSend)
         {
             return new PluginBlockProcessResult(
@@ -190,13 +202,60 @@ public sealed class PluginBlockProcessor(
         }
     }
 
+    private static void ApplyDefaultParameters(Plugin plugin)
+    {
+        if (plugin.Parameters.Count > 0)
+        {
+            return;
+        }
+
+        Dictionary<uint, float>? defaults = plugin.Descriptor.Name switch
+        {
+            "Delay" => new Dictionary<uint, float>
+            {
+                [100] = 0.32f,
+                [101] = 0.35f,
+                [102] = 0.35f,
+                [103] = 0.0f
+            },
+            "Reverb" => new Dictionary<uint, float>
+            {
+                [100] = 0.55f,
+                [101] = 0.35f,
+                [102] = 0.65f,
+                [103] = 0.8f
+            },
+            _ => null
+        };
+
+        if (defaults is not null)
+        {
+            plugin.SetParameters(defaults);
+        }
+    }
+
     private static ReadOnlyMemory<float> ProcessWithEvents(
         VstEngine vst,
         Plugin plugin,
         IReadOnlyList<PluginEvent> events,
-        int frames
+        int frames,
+        ReadOnlyMemory<float>? inputAudio
     )
     {
+        if (plugin.Descriptor.Type == PluginType.EFFECT)
+        {
+            foreach (PluginEvent pluginEvent in events)
+            {
+                ApplyEvent(vst, plugin, pluginEvent);
+            }
+
+            ReadOnlyMemory<float> effectInput = inputAudio.HasValue
+                ? inputAudio.Value
+                : new ReadOnlyMemory<float>(new float[frames * Math.Max(1, vst.Channels)]);
+
+            return vst.Process(effectInput.Span, frames).ToArray();
+        }
+
         if (events.Count == 0)
         {
             return vst.Process(frames).ToArray();
