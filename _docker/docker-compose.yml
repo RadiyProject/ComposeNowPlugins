@@ -1,11 +1,11 @@
 name: compose-now
 
 services:
-  gateway:
+  plugins:
     build:
       context: .
       target: dev
-    image: gateway:dev
+    image: compose-now-plugins:dev
     restart: always
     networks:
       - radx
@@ -16,8 +16,8 @@ services:
       DOTNET_WATCH_SUPPRESS_LAUNCH_BROWSER: ${DOTNET_WATCH_SUPPRESS_LAUNCH_BROWSER}
       ASPNETCORE_ENVIRONMENT: ${APP_MODE}
       DOTNET_WATCH_RESTART_ON_RUDE_EDIT: "true"
-    ports:
-      - "${ASPNETCORE_PORT}:5001"
+    expose:
+      - 5001
     volumes:
       - ../container/obj:/app/obj
       - ../container/bin:/app/bin

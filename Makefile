@@ -17,7 +17,7 @@ rebuild:
 	cd _docker && docker compose --env-file ../.env build
 
 shell:
-	cd _docker && docker compose --env-file ../.env exec vst-host bash
+	cd _docker && docker compose --env-file ../.env exec plugins bash
 
 build:
 #--build
