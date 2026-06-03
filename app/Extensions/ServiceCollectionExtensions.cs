@@ -12,6 +12,7 @@ public static class ServiceCollectionExtensions
         services.AddPluginCatalog(configuration);
         services.AddRepositories();
         services.AddRedisCache();
+        services.AddPluginClusterServices();
         services.AddRuntimeSessions();
         services.AddRealtimeTransports();
         services.AddVstProcessing();

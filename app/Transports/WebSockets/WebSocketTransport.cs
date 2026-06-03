@@ -1,10 +1,18 @@
 using System.Net.WebSockets;
+using ComposeNowPlugins.Services.Cluster;
 
 namespace ComposeNowPlugins.Transports.WebSockets;
 
-public class WebSocketTransport(IRuntimeSessionFactory factory, ILogger<WebSocketTransport> log) : IRealtimeTransport
+public class WebSocketTransport(
+    IRuntimeSessionFactory factory,
+    IPluginNodeState nodeState,
+    IPluginLeaseValidator leaseValidator,
+    ILogger<WebSocketTransport> log
+) : IRealtimeTransport
 {
     private readonly IRuntimeSessionFactory _factory = factory;
+    private readonly IPluginNodeState _nodeState = nodeState;
+    private readonly IPluginLeaseValidator _leaseValidator = leaseValidator;
     private readonly ILogger<WebSocketTransport> _log = log;
 
     public async Task ConnectAsync(HttpContext context, CancellationToken cancellationToken)
@@ -15,9 +23,39 @@ public class WebSocketTransport(IRuntimeSessionFactory factory, ILogger<WebSocke
             return;
         }
 
-        using var webSocket = await context.WebSockets.AcceptWebSocketAsync();
+        string pluginName = context.Request.Query["plugin"].ToString();
+        string leaseId = context.Request.Query["leaseId"].ToString();
+
+        if (_nodeState.IsDraining)
+        {
+            context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
+            await context.Response.WriteAsync("Plugin node is draining.", cancellationToken);
+            return;
+        }
+
+        if (!_nodeState.TryAcquireSession())
+        {
+            context.Response.StatusCode = StatusCodes.Status429TooManyRequests;
+            await context.Response.WriteAsync("Plugin node is busy.", cancellationToken);
+            return;
+        }
+
+        bool acquired = true;
+        WebSocket? webSocket = null;
         try
         {
+            webSocket = await context.WebSockets.AcceptWebSocketAsync();
+
+            if (!await _leaseValidator.ValidateAsync(leaseId, pluginName, context.RequestAborted))
+            {
+                await webSocket.CloseAsync(
+                    WebSocketCloseStatus.PolicyViolation,
+                    "invalid lease",
+                    context.RequestAborted
+                );
+                return;
+            }
+
             var channel = new WebSocketChannel(webSocket);
             var session = _factory.Create(context);   // echo/audio/…
             await session.RunAsync(channel, context.RequestAborted);
@@ -34,11 +72,18 @@ public class WebSocketTransport(IRuntimeSessionFactory factory, ILogger<WebSocke
         // using сам закроет, но если вдруг мы всё ещё открыты — отправим финальный close
         finally
         {
-            if (webSocket.State is WebSocketState.Open or WebSocketState.CloseReceived)
+            if (acquired)
+            {
+                _nodeState.ReleaseSession();
+            }
+
+            if (webSocket?.State is WebSocketState.Open or WebSocketState.CloseReceived)
             {
                 try { await webSocket.CloseAsync(WebSocketCloseStatus.NormalClosure, "bye", cancellationToken); }
                 catch { /* ignore */ }
             }
+
+            webSocket?.Dispose();
         }
     }
 }

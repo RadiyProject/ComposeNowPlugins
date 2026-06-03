@@ -1,0 +1,9 @@
+FROM busybox:1.36 AS runtime
+
+WORKDIR /artifacts
+
+COPY vst_builds/SineSynthHeadless ./SineSynthHeadless
+COPY vst_builds/PianoHeadless ./PianoHeadless
+COPY vst_builds/DelayHeadless ./DelayHeadless
+COPY vst_builds/ReverbHeadless ./ReverbHeadless
+COPY vst_builds/VstHostCapi ./VstHostCapi
