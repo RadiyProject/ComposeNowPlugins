@@ -36,7 +36,7 @@ public sealed class AudioRuntimeSession(
     private const int DefaultChannels = 2;
     private const string DefaultMode = "realtime";
 
-    private const int RealtimeDefaultLatencyBlocks = 2;
+    private const int RealtimeDefaultLatencyBlocks = 20;
     private const int RenderDelayBlocks = 8;
     private const int RenderInitialPrefillBlocks = 0;
 
@@ -356,6 +356,11 @@ public sealed class AudioRuntimeSession(
                 out AudioInputBlock? inputBlock
             ) && inputBlock is not null)
             {
+                if ((long)audioSeq <= Volatile.Read(ref _lastProcessedSeq))
+                {
+                    continue;
+                }
+
                 _inputBlocks[audioSeq] = inputBlock;
 
                 if (_offlineMode)
