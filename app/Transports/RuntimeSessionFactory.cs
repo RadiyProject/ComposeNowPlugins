@@ -11,7 +11,7 @@ public sealed class RuntimeSessionFactory(IServiceProvider serviceProvider,
     public IRuntimeSession Create(HttpContext context)
     {
         string mode = context.Request.Query["mode"].ToString();
-        _logger.LogInformation(
+        _logger.LogDebug(
             "Runtime session request. Path={Path}, Query={Query}, Mode={Mode}, PluginId={PluginId}",
             context.Request.Path,
             context.Request.QueryString,

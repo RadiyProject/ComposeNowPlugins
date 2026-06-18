@@ -36,7 +36,7 @@ public sealed class AudioRuntimeSession(
     private const int DefaultChannels = 2;
     private const string DefaultMode = "realtime";
 
-    private const int RealtimeDefaultLatencyBlocks = 20;
+    private const int RealtimeDefaultLatencyBlocks = 2;
     private const int RenderDelayBlocks = 8;
     private const int RenderInitialPrefillBlocks = 0;
 
@@ -127,7 +127,7 @@ public sealed class AudioRuntimeSession(
                     ? DefaultMode
                     : hello.Mode;
 
-                _log.LogInformation(
+                _log.LogDebug(
                     "Hello received. PluginId={PluginId}, SampleRate={SampleRate}, BlockSize={BlockSize}, Channels={Channels}, Mode={Mode}",
                     _pluginId,
                     sampleRate,
@@ -277,7 +277,7 @@ public sealed class AudioRuntimeSession(
 
         if (status == RepositoryActionStatus.Success)
         {
-            _log.LogInformation(
+            _log.LogDebug(
                 "Plugin state created. PluginId={PluginId}, PluginName={PluginName}",
                 _pluginId,
                 _pluginName
@@ -1040,7 +1040,7 @@ public sealed class AudioRuntimeSession(
             ct
         );
 
-        _log.LogInformation(
+        _log.LogDebug(
             "Audio session begin sent. PluginId={PluginId}, Epoch={Epoch}, Mode={Mode}, SampleRate={SampleRate}, BlockSize={BlockSize}, Channels={Channels}, LatencyFrames={LatencyFrames}",
             _pluginId.GetValue(),
             _currentEpoch,
@@ -1072,7 +1072,7 @@ public sealed class AudioRuntimeSession(
 
         if (readyConfirmed)
         {
-            _log.LogInformation(
+            _log.LogDebug(
                 "Audio session ready confirmed. PluginId={PluginId}, Epoch={Epoch}, Mode={Mode}",
                 _pluginId.GetValue(),
                 _currentEpoch,

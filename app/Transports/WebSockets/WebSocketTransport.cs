@@ -62,7 +62,7 @@ public class WebSocketTransport(
         }
         catch (OperationCanceledException)
         {
-            _log.LogInformation("WS session cancelled."); // не считаем ошибкой
+            _log.LogDebug("WS session cancelled.");
         }
         catch (WebSocketException ex)
         {

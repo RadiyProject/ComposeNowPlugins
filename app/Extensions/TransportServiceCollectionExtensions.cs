@@ -9,14 +9,7 @@ public static class TransportServiceCollectionExtensions
         this IServiceCollection services
     )
     {
-        services.AddScoped<WebSocketTransport>();
-
-        services.AddScoped<IRealtimeTransport>(serviceProvider =>
-            new LoggingTransport(
-                serviceProvider.GetRequiredService<WebSocketTransport>(),
-                serviceProvider.GetRequiredService<ILogger<LoggingTransport>>()
-            )
-        );
+        services.AddScoped<IRealtimeTransport, WebSocketTransport>();
 
         return services;
     }

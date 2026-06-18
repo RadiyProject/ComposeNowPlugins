@@ -40,7 +40,7 @@ public sealed class VstEngine : IAsyncDisposable
 
         _tmp = new float[_blockSize * _channels];
 
-        _log?.LogInformation(
+        _log?.LogDebug(
             "VstEngine ready: {Path} @ {SR} Hz, block {Block}, ch {Ch}",
             pluginPath,
             _sampleRate,
@@ -132,7 +132,7 @@ public sealed class VstEngine : IAsyncDisposable
         if (_tmp.Length != _blockSize * _channels)
             _tmp = new float[_blockSize * _channels];
 
-        _log?.LogInformation("VstEngine reconfigured: {SR} Hz, block {Block}, ch {Ch}, offline={Offline}",
+        _log?.LogDebug("VstEngine reconfigured: {SR} Hz, block {Block}, ch {Ch}, offline={Offline}",
             _sampleRate, _blockSize, _channels, offline);
         return true;
     }
