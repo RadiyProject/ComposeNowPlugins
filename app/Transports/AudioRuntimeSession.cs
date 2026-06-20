@@ -36,8 +36,6 @@ public sealed class AudioRuntimeSession(
     private const int DefaultChannels = 2;
     private const string DefaultMode = "realtime";
 
-    private const int RealtimeDefaultLatencyBlocks = 2;
-    private const int RenderDelayBlocks = 8;
     private const int RenderInitialPrefillBlocks = 0;
 
     private record Evt(int Type, int Pitch, float Vel, int Offs);
@@ -358,6 +356,12 @@ public sealed class AudioRuntimeSession(
             {
                 if ((long)audioSeq <= Volatile.Read(ref _lastProcessedSeq))
                 {
+                    _log.LogWarning(
+                        "Late AIN1 input block dropped. PluginId={PluginId}, InputSeq={InputSeq}, LastProcessedSeq={LastProcessedSeq}",
+                        _pluginId.GetValue(),
+                        audioSeq,
+                        Volatile.Read(ref _lastProcessedSeq)
+                    );
                     continue;
                 }
 
@@ -1025,13 +1029,9 @@ public sealed class AudioRuntimeSession(
             TaskCreationOptions.RunContinuationsAsynchronously
         );
 
-        int latencyFrames = offline
-            ? CalculateRenderDelayFrames(sampleRate, blockSize)
-            : CalculateRealtimeDelayFrames(blockSize);
-
         string beginMessage = offline
-            ? $"render begin {_currentEpoch} {latencyFrames} {RenderInitialPrefillBlocks}"
-            : $"realtime begin {_currentEpoch} {latencyFrames}";
+            ? $"render begin {_currentEpoch} 0 {RenderInitialPrefillBlocks}"
+            : $"realtime begin {_currentEpoch} 0";
 
         await ch.SendAsync(
             Encoding.UTF8.GetBytes(beginMessage),
@@ -1041,14 +1041,13 @@ public sealed class AudioRuntimeSession(
         );
 
         _log.LogDebug(
-            "Audio session begin sent. PluginId={PluginId}, Epoch={Epoch}, Mode={Mode}, SampleRate={SampleRate}, BlockSize={BlockSize}, Channels={Channels}, LatencyFrames={LatencyFrames}",
+            "Audio session begin sent. PluginId={PluginId}, Epoch={Epoch}, Mode={Mode}, SampleRate={SampleRate}, BlockSize={BlockSize}, Channels={Channels}",
             _pluginId.GetValue(),
             _currentEpoch,
             offline ? "offline" : "realtime",
             sampleRate,
             blockSize,
-            channels,
-            latencyFrames
+            channels
         );
 
         TimeSpan readyTimeout = offline
@@ -1130,7 +1129,7 @@ public sealed class AudioRuntimeSession(
             {
                 long inputDeadline = offline
                     ? Stopwatch.GetTimestamp() + (long)(TimeSpan.FromSeconds(10).TotalSeconds * Stopwatch.Frequency)
-                    : long.MaxValue;
+                    : Stopwatch.GetTimestamp() + (long)(TimeSpan.FromMilliseconds(250).TotalSeconds * Stopwatch.Frequency);
 
                 while (!_inputBlocks.TryRemove(seq, out inputBlock))
                 {
@@ -1140,6 +1139,23 @@ public sealed class AudioRuntimeSession(
                     }
 
                     await Task.Delay(1, ct);
+                }
+
+                if (inputBlock is null && !offline)
+                {
+                    _log.LogWarning(
+                        "Realtime AIN1 input block timeout. Processing silence to keep effect stream alive. PluginId={PluginId}, Seq={Seq}, BlockSize={BlockSize}, Channels={Channels}",
+                        _pluginId.GetValue(),
+                        seq,
+                        blockSize,
+                        channels
+                    );
+
+                    inputBlock = new AudioInputBlock(
+                        blockSize,
+                        channels,
+                        new float[blockSize * channels]
+                    );
                 }
             }
             else
@@ -1259,20 +1275,6 @@ public sealed class AudioRuntimeSession(
         tcs?.TrySetResult(token);
 
         return true;
-    }
-
-    private static int CalculateRealtimeDelayFrames(int blockSize)
-    {
-        blockSize = NormalizePositive(blockSize, DefaultBlockSize);
-        int frames = blockSize * RealtimeDefaultLatencyBlocks;
-
-        // Чтобы не получить слишком маленький prebuffer на странных sample rate.
-        return Math.Max(128, frames);
-    }
-
-    private static int CalculateRenderDelayFrames(int sampleRate, int blockSize)
-    {
-        return 0;
     }
 
     private static int NormalizePositive(
