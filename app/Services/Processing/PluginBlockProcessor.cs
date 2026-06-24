@@ -113,6 +113,7 @@ public sealed class PluginBlockProcessor(
     )
     {
         VstEngine vst = _vstEngineFactory.Create(
+            pluginId,
             plugin.Descriptor.Name,
             plugin.SampleRate,
             plugin.BlockSize,

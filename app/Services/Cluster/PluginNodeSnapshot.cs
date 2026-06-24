@@ -5,9 +5,7 @@ public sealed record PluginNodeSnapshot(
     string WebSocketUrl,
     string[] Plugins,
     int ActiveSessions,
-    int MaxSessions,
     double LoadPercent,
     bool Draining,
     DateTimeOffset UpdatedAt
 );
-

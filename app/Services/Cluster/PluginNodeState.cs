@@ -1,19 +1,25 @@
+using System.Diagnostics;
+
 namespace ComposeNowPlugins.Services.Cluster;
 
 public sealed class PluginNodeState(IHostApplicationLifetime lifetime) : IPluginNodeState
 {
     private const string DrainFile = "/tmp/compose-now-draining";
+    private static readonly TimeSpan LoadSampleInterval = TimeSpan.FromMilliseconds(500);
+
     private readonly IHostApplicationLifetime _lifetime = lifetime;
+    private readonly object _loadLock = new();
+    private readonly Process _process = Process.GetCurrentProcess();
+    private DateTimeOffset _lastLoadSampleAt = DateTimeOffset.UtcNow;
+    private TimeSpan _lastProcessorTime = Process.GetCurrentProcess().TotalProcessorTime;
+    private double _loadPercent;
     private int _activeSessions;
 
     public string NodeId { get; } = ReadNodeId();
     public string WebSocketUrl { get; } = ReadWebSocketUrl();
     public int ActiveSessions => Volatile.Read(ref _activeSessions);
-    public int MaxSessions { get; } = ReadPositiveInt("COMPOSE_NOW_PLUGIN_MAX_THREADS_PER_NODE", 4);
     public double BusyThresholdPercent { get; } = ReadPositiveDouble("COMPOSE_NOW_PLUGIN_BUSY_THRESHOLD_PERCENT", 90);
-    public double LoadPercent => MaxSessions <= 0
-        ? 100
-        : Math.Min(100, ActiveSessions * 100d / MaxSessions);
+    public double LoadPercent => ReadProcessCpuLoadPercent();
 
     public bool IsDraining =>
         _lifetime.ApplicationStopping.IsCancellationRequested
@@ -29,11 +35,8 @@ public sealed class PluginNodeState(IHostApplicationLifetime lifetime) : IPlugin
             }
 
             int current = Volatile.Read(ref _activeSessions);
-            double projectedLoadPercent = MaxSessions <= 0
-                ? 100
-                : (current + 1) * 100d / MaxSessions;
 
-            if (current >= MaxSessions || projectedLoadPercent >= BusyThresholdPercent)
+            if (LoadPercent >= BusyThresholdPercent)
             {
                 return false;
             }
@@ -51,6 +54,30 @@ public sealed class PluginNodeState(IHostApplicationLifetime lifetime) : IPlugin
         if (value < 0)
         {
             Interlocked.Exchange(ref _activeSessions, 0);
+        }
+    }
+
+    private double ReadProcessCpuLoadPercent()
+    {
+        lock (_loadLock)
+        {
+            var now = DateTimeOffset.UtcNow;
+            TimeSpan elapsed = now - _lastLoadSampleAt;
+            if (elapsed < LoadSampleInterval)
+            {
+                return _loadPercent;
+            }
+
+            TimeSpan processorTime = _process.TotalProcessorTime;
+            TimeSpan processorElapsed = processorTime - _lastProcessorTime;
+            double processorCount = Math.Max(1, Environment.ProcessorCount);
+            double loadPercent = processorElapsed.TotalMilliseconds / elapsed.TotalMilliseconds / processorCount * 100d;
+
+            _lastLoadSampleAt = now;
+            _lastProcessorTime = processorTime;
+            _loadPercent = Math.Clamp(loadPercent, 0d, 100d);
+
+            return _loadPercent;
         }
     }
 
@@ -74,14 +101,6 @@ public sealed class PluginNodeState(IHostApplicationLifetime lifetime) : IPlugin
             ?? "plugins";
 
         return $"ws://{host}:5001/ws";
-    }
-
-    private static int ReadPositiveInt(string name, int fallback)
-    {
-        string? raw = Environment.GetEnvironmentVariable(name);
-        return int.TryParse(raw, out int value) && value > 0
-            ? value
-            : fallback;
     }
 
     private static double ReadPositiveDouble(string name, double fallback)

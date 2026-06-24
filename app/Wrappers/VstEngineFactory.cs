@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using ComposeNowPlugins.Models.Ids;
 using ComposeNowPlugins.Services.Plugins;
 
 namespace ComposeNowPlugins.Wrappers;
@@ -11,10 +12,12 @@ public sealed class VstEngineFactory(IPluginCatalog pluginCatalog, ILoggerFactor
     private readonly ILoggerFactory _loggerFactory = loggerFactory;
     private readonly IConfiguration _cfg = cfg;
 
-    public VstEngine Create(string pluginName, int sampleRate, int blockSize, int channels)
+    public VstEngine Create(PluginId pluginId, string pluginName, int sampleRate, int blockSize, int channels)
     {
+        string key = $"{pluginName}:{pluginId.GetValue()}";
+
         return _vstEngines.GetOrAdd(
-            pluginName,
+            key,
             _ => CreateNew(pluginName, sampleRate, blockSize, channels)
         );
     }

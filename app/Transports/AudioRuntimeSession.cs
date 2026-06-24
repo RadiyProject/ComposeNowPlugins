@@ -356,7 +356,7 @@ public sealed class AudioRuntimeSession(
             {
                 if ((long)audioSeq <= Volatile.Read(ref _lastProcessedSeq))
                 {
-                    _log.LogWarning(
+                    _log.LogDebug(
                         "Late AIN1 input block dropped. PluginId={PluginId}, InputSeq={InputSeq}, LastProcessedSeq={LastProcessedSeq}",
                         _pluginId.GetValue(),
                         audioSeq,
@@ -1143,7 +1143,7 @@ public sealed class AudioRuntimeSession(
 
                 if (inputBlock is null && !offline)
                 {
-                    _log.LogWarning(
+                    _log.LogDebug(
                         "Realtime AIN1 input block timeout. Processing silence to keep effect stream alive. PluginId={PluginId}, Seq={Seq}, BlockSize={BlockSize}, Channels={Channels}",
                         _pluginId.GetValue(),
                         seq,

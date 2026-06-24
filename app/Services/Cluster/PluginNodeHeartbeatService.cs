@@ -68,7 +68,6 @@ public sealed class PluginNodeHeartbeatService(
             _nodeState.WebSocketUrl,
             [.. _pluginCatalog.GetAvailable().Select(plugin => plugin.Name)],
             _nodeState.ActiveSessions,
-            _nodeState.MaxSessions,
             _nodeState.LoadPercent,
             _nodeState.IsDraining,
             DateTimeOffset.UtcNow
