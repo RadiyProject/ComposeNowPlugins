@@ -1,3 +1,4 @@
+using System.Buffers;
 using ComposeNowPlugins.Cache;
 using ComposeNowPlugins.Configurations;
 using ComposeNowPlugins.Models;
@@ -43,16 +44,26 @@ public sealed class PluginBlockProcessor(
         IReadOnlyList<PluginEvent> blockEvents =
             await _pluginEventRepository.GetBlockEventsAsync(pluginId, seq);
 
-        List<PluginEvent> events = [..controlEvents, ..blockEvents];
+        List<(PluginEvent Event, int Index)> sortableEvents = new(controlEvents.Count + blockEvents.Count);
+        AddPluginEvents(sortableEvents, controlEvents, pluginId);
+        AddPluginEvents(sortableEvents, blockEvents, pluginId);
 
-        events = [.. events.Where(item => BelongsToPlugin(item, pluginId))];
+        sortableEvents.Sort(static (left, right) =>
+        {
+            int byOffset = left.Event.Offset.CompareTo(right.Event.Offset);
+            if (byOffset != 0) return byOffset;
 
-        events = [.. events
-            .Select((item, index) => new { Event = item, Index = index })
-            .OrderBy(item => item.Event.Offset)
-            .ThenBy(item => EventPriority(item.Event))
-            .ThenBy(item => item.Index)
-            .Select(item => item.Event)];
+            int byPriority = EventPriority(left.Event).CompareTo(EventPriority(right.Event));
+            return byPriority != 0
+                ? byPriority
+                : left.Index.CompareTo(right.Index);
+        });
+
+        List<PluginEvent> events = new(sortableEvents.Count);
+        foreach ((PluginEvent pluginEvent, _) in sortableEvents)
+        {
+            events.Add(pluginEvent);
+        }
 
         bool hasOwnInputEvents = events.Count > 0;
         bool hasOwnActiveAudio = plugin.HasActiveAudio();
@@ -63,7 +74,7 @@ public sealed class PluginBlockProcessor(
             await _pluginEventRepository.DeleteBlockEventsAsync(pluginId, seq);
 
             return new PluginBlockProcessResult(
-                new float[frames * Math.Max(1, plugin.Channels)],
+                ReadOnlyMemory<float>.Empty,
                 ShouldSend: true
             );
         }
@@ -92,12 +103,20 @@ public sealed class PluginBlockProcessor(
         );
     }
 
-    private static bool BelongsToPlugin(
-        PluginEvent pluginEvent,
+    private static void AddPluginEvents(
+        List<(PluginEvent Event, int Index)> target,
+        IReadOnlyList<PluginEvent> source,
         PluginId pluginId
     )
     {
-        return pluginEvent.PluginId.GetValue() == pluginId.GetValue();
+        for (int i = 0; i < source.Count; i++)
+        {
+            PluginEvent pluginEvent = source[i];
+            if (pluginEvent.PluginId.GetValue() == pluginId.GetValue())
+            {
+                target.Add((pluginEvent, target.Count));
+            }
+        }
     }
 
     private async Task<PluginBlockProcessResult> ProcessBlockUnderGateAsync(
@@ -148,11 +167,11 @@ public sealed class PluginBlockProcessor(
             }
         }
 
-        vst.SetState(plugin.State);
+        vst.SetStateIfChanged(plugin.State);
 
         ApplyKnownParameters(vst, plugin);
 
-        ReadOnlyMemory<float> audio = ProcessWithEvents(
+        ProcessedAudio processedAudio = ProcessWithEvents(
             vst,
             plugin,
             events,
@@ -161,7 +180,7 @@ public sealed class PluginBlockProcessor(
         );
 
         bool isSilent = IsSilent(
-            audio,
+            processedAudio.Audio,
             threshold: 0.00001f
         );
 
@@ -180,6 +199,8 @@ public sealed class PluginBlockProcessor(
         bool shouldSend = offline || hasOwnInputEvents || inputAudio.HasValue || plugin.HasActiveAudio() || !isSilent;
         if (!shouldSend)
         {
+            processedAudio.Dispose();
+
             return new PluginBlockProcessResult(
                 ReadOnlyMemory<float>.Empty,
                 ShouldSend: false
@@ -187,8 +208,9 @@ public sealed class PluginBlockProcessor(
         }
 
         return new PluginBlockProcessResult(
-            audio,
-            shouldSend
+            processedAudio.Audio,
+            shouldSend,
+            processedAudio.Lease
         );
     }
 
@@ -199,7 +221,7 @@ public sealed class PluginBlockProcessor(
     {
         foreach ((uint parameterId, float value) in plugin.Parameters)
         {
-            vst.SetParam(parameterId, value);
+            vst.SetParamIfChanged(parameterId, value);
         }
     }
 
@@ -235,7 +257,7 @@ public sealed class PluginBlockProcessor(
         }
     }
 
-    private static ReadOnlyMemory<float> ProcessWithEvents(
+    private static ProcessedAudio ProcessWithEvents(
         VstEngine vst,
         Plugin plugin,
         IReadOnlyList<PluginEvent> events,
@@ -250,20 +272,22 @@ public sealed class PluginBlockProcessor(
                 ApplyEvent(vst, plugin, pluginEvent);
             }
 
-            ReadOnlyMemory<float> effectInput = inputAudio.HasValue
-                ? inputAudio.Value
-                : new ReadOnlyMemory<float>(new float[frames * Math.Max(1, vst.Channels)]);
+            ReadOnlySpan<float> effectInput = inputAudio.HasValue
+                ? inputAudio.Value.Span
+                : ReadOnlySpan<float>.Empty;
 
-            return vst.Process(effectInput.Span, frames).ToArray();
+            return new ProcessedAudio(vst.Process(effectInput, frames));
         }
 
         if (events.Count == 0)
         {
-            return vst.Process(frames).ToArray();
+            return new ProcessedAudio(vst.Process(frames));
         }
 
         int channels = vst.Channels;
-        float[] outBuffer = new float[frames * channels];
+        int samples = checked(frames * channels);
+        PooledAudioBuffer outBuffer = PooledAudioBuffer.Rent(samples);
+        outBuffer.Buffer.AsSpan(0, outBuffer.Length).Clear();
 
         int cursor = 0;
 
@@ -281,7 +305,7 @@ public sealed class PluginBlockProcessor(
             {
                 CopyAudioPart(
                     vst.Process(len),
-                    outBuffer,
+                    outBuffer.Buffer,
                     cursor,
                     channels
                 );
@@ -296,13 +320,13 @@ public sealed class PluginBlockProcessor(
         {
             CopyAudioPart(
                 vst.Process(frames - cursor),
-                outBuffer,
+                outBuffer.Buffer,
                 cursor,
                 channels
             );
         }
 
-        return outBuffer;
+        return new ProcessedAudio(outBuffer.Memory, outBuffer);
     }
 
     private static void ApplyEvent(
@@ -338,7 +362,7 @@ public sealed class PluginBlockProcessor(
                 if (pluginEvent.ParameterId.HasValue &&
                     pluginEvent.ParameterValue.HasValue)
                 {
-                    vst.SetParam(
+                    vst.SetParamIfChanged(
                         pluginEvent.ParameterId.Value,
                         pluginEvent.ParameterValue.Value
                     );
@@ -368,15 +392,7 @@ public sealed class PluginBlockProcessor(
         int channels
     )
     {
-        float[] sourceArray = source.ToArray();
-
-        Buffer.BlockCopy(
-            sourceArray,
-            0,
-            target,
-            frameOffset * channels * sizeof(float),
-            sourceArray.Length * sizeof(float)
-        );
+        source.Span.CopyTo(target.AsSpan(frameOffset * channels));
     }
 
     private static bool IsSilent(
@@ -412,5 +428,54 @@ public sealed class PluginBlockProcessor(
             PluginEventType.NoteOn => 3,
             _ => 10
         };
+    }
+
+    private readonly record struct ProcessedAudio(
+        ReadOnlyMemory<float> Audio,
+        IDisposable? Lease = null
+    ) : IDisposable
+    {
+        public void Dispose()
+        {
+            Lease?.Dispose();
+        }
+    }
+
+    private sealed class PooledAudioBuffer : IDisposable
+    {
+        private float[]? _buffer;
+
+        private PooledAudioBuffer(float[] buffer, int length)
+        {
+            _buffer = buffer;
+            Length = length;
+        }
+
+        public float[] Buffer => _buffer
+            ?? throw new ObjectDisposedException(nameof(PooledAudioBuffer));
+
+        public int Length { get; }
+
+        public ReadOnlyMemory<float> Memory => Buffer.AsMemory(0, Length);
+
+        public static PooledAudioBuffer Rent(int length)
+        {
+            return new PooledAudioBuffer(
+                ArrayPool<float>.Shared.Rent(length),
+                length
+            );
+        }
+
+        public void Dispose()
+        {
+            float[]? buffer = _buffer;
+            if (buffer is null)
+            {
+                return;
+            }
+
+            _buffer = null;
+            ArrayPool<float>.Shared.Return(buffer);
+        }
     }
 }

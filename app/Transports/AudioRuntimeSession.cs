@@ -2,6 +2,7 @@ using System.Buffers.Binary;
 using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Globalization;
+using System.IO.Compression;
 using System.Text;
 using ComposeNowPlugins.Configurations;
 using ComposeNowPlugins.Models;
@@ -348,7 +349,7 @@ public sealed class AudioRuntimeSession(
                 continue;
             }
 
-            if (TryParseAin1Message(
+            if (TryParseAudioInputMessage(
                 span,
                 out ulong audioSeq,
                 out AudioInputBlock? inputBlock
@@ -756,6 +757,97 @@ public sealed class AudioRuntimeSession(
         );
     }
 
+    private static bool TryParseAudioInputMessage(
+        ReadOnlySpan<byte> span,
+        out ulong seq,
+        out AudioInputBlock? inputBlock
+    )
+    {
+        if (TryParseAin1Message(
+                span,
+                out seq,
+                out inputBlock
+            ))
+        {
+            return true;
+        }
+
+        return TryParseAiz1Message(
+            span,
+            out seq,
+            out inputBlock
+        );
+    }
+
+    private static bool TryParseAiz1Message(
+        ReadOnlySpan<byte> span,
+        out ulong seq,
+        out AudioInputBlock? inputBlock
+    )
+    {
+        seq = 0;
+        inputBlock = null;
+
+        if (span.Length < 28 ||
+            span[0] != 'A' ||
+            span[1] != 'I' ||
+            span[2] != 'Z' ||
+            span[3] != '1')
+        {
+            return false;
+        }
+
+        seq = BinaryPrimitives.ReadUInt64LittleEndian(span.Slice(4, 8));
+        int uncompressedBytes = BinaryPrimitives.ReadInt32LittleEndian(span.Slice(20, 4));
+        int compressedBytes = BinaryPrimitives.ReadInt32LittleEndian(span.Slice(24, 4));
+
+        if (uncompressedBytes <= 0 ||
+            compressedBytes <= 0 ||
+            span.Length < 28 + compressedBytes)
+        {
+            return false;
+        }
+
+        byte[] uncompressed = new byte[uncompressedBytes];
+
+        try
+        {
+            using MemoryStream source = new(span.Slice(28, compressedBytes).ToArray());
+            using ZLibStream deflate = new(source, CompressionMode.Decompress);
+            int totalRead = 0;
+            while (totalRead < uncompressedBytes)
+            {
+                int read = deflate.Read(
+                    uncompressed,
+                    totalRead,
+                    uncompressedBytes - totalRead
+                );
+
+                if (read <= 0)
+                {
+                    break;
+                }
+
+                totalRead += read;
+            }
+
+            if (totalRead != uncompressedBytes)
+            {
+                return false;
+            }
+        }
+        catch (InvalidDataException)
+        {
+            return false;
+        }
+
+        return TryParseAin1Message(
+            uncompressed,
+            out seq,
+            out inputBlock
+        );
+    }
+
     private static bool TryParseAin1Message(
         ReadOnlySpan<byte> span,
         out ulong seq,
@@ -1150,12 +1242,6 @@ public sealed class AudioRuntimeSession(
                         blockSize,
                         channels
                     );
-
-                    inputBlock = new AudioInputBlock(
-                        blockSize,
-                        channels,
-                        new float[blockSize * channels]
-                    );
                 }
             }
             else
@@ -1179,25 +1265,41 @@ public sealed class AudioRuntimeSession(
                 ct
             );
 
-            Volatile.Write(ref _lastProcessedSeq, (long)seq);
-
-            if (result.ShouldSend)
+            try
             {
-                byte[] frame = Aud1.Pack(
-                    epoch,
-                    seq,
-                    ts,
-                    sampleRate,
-                    channels,
-                    result.Audio
-                );
+                Volatile.Write(ref _lastProcessedSeq, (long)seq);
 
-                await ch.SendAsync(
-                    frame,
-                    "application/octet-stream",
-                    endOfMessage: true,
-                    ct
-                );
+                if (result.ShouldSend)
+                {
+                    using Aud1.RentedFrame frame = result.Audio.IsEmpty
+                        ? Aud1.RentSilenceCompressed(
+                            epoch,
+                            seq,
+                            ts,
+                            sampleRate,
+                            channels,
+                            framesForBlock
+                        )
+                        : Aud1.RentPackCompressed(
+                            epoch,
+                            seq,
+                            ts,
+                            sampleRate,
+                            channels,
+                            result.Audio
+                        );
+
+                    await ch.SendAsync(
+                        frame.Memory,
+                        "application/octet-stream",
+                        endOfMessage: true,
+                        ct
+                    );
+                }
+            }
+            finally
+            {
+                result.Dispose();
             }
 
             if (offline)

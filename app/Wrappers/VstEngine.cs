@@ -10,6 +10,10 @@ public sealed class VstEngine : IAsyncDisposable
     private int _blockSize;
     private int _channels = 2;
     private float[] _tmp;
+    private float[] _inputTmp;
+    private readonly Dictionary<uint, float> _appliedParameters = new();
+    private ulong _knownStateHash;
+    private int _knownStateLength = -1;
 
     public VstEngine(string pluginPath, ILogger<VstEngine> log, int sampleRate = 44100,
         int blockSize = 512, int channels = 2)
@@ -38,7 +42,9 @@ public sealed class VstEngine : IAsyncDisposable
         var latencySamples = (uint)(_sampleRate * (devDelayMs / 1000.0));
         VstNative.VstSetLatency(_host, latencySamples);
 
-        _tmp = new float[_blockSize * _channels];
+        int initialBufferSize = _blockSize * _channels;
+        _tmp = new float[initialBufferSize];
+        _inputTmp = new float[initialBufferSize];
 
         _log?.LogDebug(
             "VstEngine ready: {Path} @ {SR} Hz, block {Block}, ch {Ch}",
@@ -56,7 +62,21 @@ public sealed class VstEngine : IAsyncDisposable
     public void NoteOn(int note, float vel = 1f) => VstNative.VstNoteOn(_host, note, vel);
     public void NoteOff(int note) => VstNative.VstNoteOff(_host, note);
 
-    public void SetParam(uint id, float norm) => VstNative.VstSetParam(_host, id, norm);
+    public void SetParam(uint id, float norm)
+    {
+        VstNative.VstSetParam(_host, id, norm);
+        _appliedParameters[id] = norm;
+    }
+
+    public void SetParamIfChanged(uint id, float norm)
+    {
+        if (_appliedParameters.TryGetValue(id, out float current) && current.Equals(norm))
+        {
+            return;
+        }
+
+        SetParam(id, norm);
+    }
 
     // генерируем следующий аудио-чанк (interleaved float32)
     public ReadOnlyMemory<float> Process()
@@ -94,14 +114,18 @@ public sealed class VstEngine : IAsyncDisposable
         int need = frames * _channels;
         if (_tmp.Length < need)
             _tmp = new float[need];
+        if (_inputTmp.Length < need)
+            _inputTmp = new float[need];
 
-        var inBuffer = new float[need];
-        input[..Math.Min(input.Length, need)].CopyTo(inBuffer);
+        int copied = Math.Min(input.Length, need);
+        input[..copied].CopyTo(_inputTmp);
+        if (copied < need)
+            Array.Clear(_inputTmp, copied, need - copied);
 
         int n;
         unsafe
         {
-            fixed (float* inPtr = inBuffer)
+            fixed (float* inPtr = _inputTmp)
             fixed (float* outPtr = _tmp)
             {
                 n = VstNative.VstProcessReplacing(_host, inPtr, outPtr, frames);
@@ -131,6 +155,9 @@ public sealed class VstEngine : IAsyncDisposable
         _channels   = ch;
         if (_tmp.Length != _blockSize * _channels)
             _tmp = new float[_blockSize * _channels];
+        if (_inputTmp.Length != _blockSize * _channels)
+            _inputTmp = new float[_blockSize * _channels];
+        _appliedParameters.Clear();
 
         _log?.LogDebug("VstEngine reconfigured: {SR} Hz, block {Block}, ch {Ch}, offline={Offline}",
             _sampleRate, _blockSize, _channels, offline);
@@ -154,6 +181,7 @@ public sealed class VstEngine : IAsyncDisposable
 
         if (size == 0)
         {
+            MarkKnownState(ReadOnlySpan<byte>.Empty);
             return [];
         }
 
@@ -173,6 +201,7 @@ public sealed class VstEngine : IAsyncDisposable
             Array.Resize(ref buf, checked((int)size));
         }
 
+        MarkKnownState(buf);
         return buf;
     }
 
@@ -189,6 +218,32 @@ public sealed class VstEngine : IAsyncDisposable
         {
             throw new InvalidOperationException("VstSetState failed.");
         }
+
+        MarkKnownState(state);
+        _appliedParameters.Clear();
+    }
+
+    public bool SetStateIfChanged(byte[]? state)
+    {
+        ObjectDisposedException.ThrowIf(_host == IntPtr.Zero, nameof(VstEngine));
+
+        state ??= [];
+        ulong hash = ComputeStateHash(state);
+
+        if (_knownStateLength == state.Length && _knownStateHash == hash)
+        {
+            return false;
+        }
+
+        if (!VstNative.VstSetState(_host, state, (uint)state.Length))
+        {
+            throw new InvalidOperationException("VstSetState failed.");
+        }
+
+        _knownStateLength = state.Length;
+        _knownStateHash = hash;
+        _appliedParameters.Clear();
+        return true;
     }
 
     public PluginProcessingMode ProcessingMode
@@ -201,5 +256,26 @@ public sealed class VstEngine : IAsyncDisposable
                 ? PluginProcessingMode.Offline
                 : PluginProcessingMode.Realtime;
         }
+    }
+
+    private void MarkKnownState(ReadOnlySpan<byte> state)
+    {
+        _knownStateLength = state.Length;
+        _knownStateHash = ComputeStateHash(state);
+    }
+
+    private static ulong ComputeStateHash(ReadOnlySpan<byte> state)
+    {
+        const ulong offset = 14695981039346656037UL;
+        const ulong prime = 1099511628211UL;
+
+        ulong hash = offset;
+        foreach (byte value in state)
+        {
+            hash ^= value;
+            hash *= prime;
+        }
+
+        return hash;
     }
 }
