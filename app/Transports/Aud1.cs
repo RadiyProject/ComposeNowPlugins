@@ -8,18 +8,28 @@ namespace ComposeNowPlugins.Transports;
 public static class Aud1
 {
     private const int HeaderSize = 40;
+    private const double MinCompressionSavingsRatio = 0.08d;
 
     public sealed class RentedFrame : IDisposable
     {
         private byte[]? _buffer;
 
-        internal RentedFrame(byte[] buffer, int length)
+        internal RentedFrame(
+            byte[] buffer,
+            int length,
+            bool compressed = false,
+            int compressedCandidateLength = 0
+        )
         {
             _buffer = buffer;
             Length = length;
+            Compressed = compressed;
+            CompressedCandidateLength = compressedCandidateLength;
         }
 
         public int Length { get; }
+        public bool Compressed { get; private set; }
+        public int CompressedCandidateLength { get; private set; }
 
         public ReadOnlyMemory<byte> Memory =>
             _buffer is null
@@ -36,6 +46,15 @@ public static class Aud1
 
             _buffer = null;
             ArrayPool<byte>.Shared.Return(buffer);
+        }
+
+        internal void UpdateCompressionMetadata(
+            bool compressed,
+            int compressedCandidateLength
+        )
+        {
+            Compressed = compressed;
+            CompressedCandidateLength = compressedCandidateLength;
         }
     }
 
@@ -94,7 +113,7 @@ public static class Aud1
         ReadOnlyMemory<float> interleaved
     )
     {
-        using RentedFrame raw = RentPack(
+        RentedFrame raw = RentPack(
             epoch,
             seq,
             ts,
@@ -110,16 +129,18 @@ public static class Aud1
             ts,
             sampleRate,
             channels,
-            interleaved.Length / channels
+            interleaved.Length / channels,
+            out int compressedCandidateLength
         );
-        return compressed ?? RentPack(
-            epoch,
-            seq,
-            ts,
-            sampleRate,
-            channels,
-            interleaved
-        );
+
+        if (compressed is null)
+        {
+            raw.UpdateCompressionMetadata(compressed: false, compressedCandidateLength);
+            return raw;
+        }
+
+        raw.Dispose();
+        return compressed;
     }
 
     public static RentedFrame RentSilenceCompressed(
@@ -131,7 +152,7 @@ public static class Aud1
         int frames
     )
     {
-        using RentedFrame raw = RentSilence(
+        RentedFrame raw = RentSilence(
             epoch,
             seq,
             ts,
@@ -147,16 +168,18 @@ public static class Aud1
             ts,
             sampleRate,
             channels,
-            frames
+            frames,
+            out int compressedCandidateLength
         );
-        return compressed ?? RentSilence(
-            epoch,
-            seq,
-            ts,
-            sampleRate,
-            channels,
-            frames
-        );
+
+        if (compressed is null)
+        {
+            raw.UpdateCompressionMetadata(compressed: false, compressedCandidateLength);
+            return raw;
+        }
+
+        raw.Dispose();
+        return compressed;
     }
 
     public static RentedFrame RentSilence(
@@ -213,7 +236,8 @@ public static class Aud1
         ulong ts,
         int sampleRate,
         int channels,
-        int frames
+        int frames,
+        out int compressedCandidateLength
     )
     {
         using MemoryStream compressedStream = new();
@@ -226,8 +250,12 @@ public static class Aud1
             deflate.Write(raw);
         }
 
+        compressedCandidateLength = compressedStream.Length > int.MaxValue - 48
+            ? int.MaxValue
+            : checked((int)compressedStream.Length + 48);
+
         if (compressedStream.Length <= 0 ||
-            compressedStream.Length + 48 >= raw.Length + HeaderSize)
+            !HasEnoughSavings(compressedCandidateLength, raw.Length + HeaderSize))
         {
             return null;
         }
@@ -256,6 +284,22 @@ public static class Aud1
 
         compressedStream.ToArray().AsSpan(0, compressedBytes).CopyTo(buf.AsSpan(48, compressedBytes));
 
-        return new RentedFrame(buf, length);
+        return new RentedFrame(
+            buf,
+            length,
+            compressed: true,
+            compressedCandidateLength: length
+        );
     }
+
+    private static bool HasEnoughSavings(int compressedLength, int rawLength)
+    {
+        if (compressedLength <= 0 || rawLength <= 0)
+        {
+            return false;
+        }
+
+        return compressedLength <= rawLength * (1d - MinCompressionSavingsRatio);
+    }
+
 }
