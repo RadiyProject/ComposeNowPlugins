@@ -1,8 +1,8 @@
 using System.Text.Json;
-using ComposeNowPlugins.Services.Plugins;
+using ComposeNowPlugins.Application.Services.Plugins;
 using StackExchange.Redis;
 
-namespace ComposeNowPlugins.Services.Cluster;
+namespace ComposeNowPlugins.Infrastructure.Services.Cluster;
 
 public sealed class PluginNodeHeartbeatService(
     IConnectionMultiplexer redis,

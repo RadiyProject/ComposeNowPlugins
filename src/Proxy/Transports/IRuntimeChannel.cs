@@ -1,4 +1,4 @@
-namespace ComposeNowPlugins.Transports;
+namespace ComposeNowPlugins.Proxy.Transports;
 
 public interface IRuntimeChannel
 {

@@ -1,9 +1,6 @@
 <Project Sdk="Microsoft.NET.Sdk.Web">
 
   <PropertyGroup>
-    <TargetFramework>net9.0</TargetFramework>
-    <Nullable>enable</Nullable>
-    <ImplicitUsings>enable</ImplicitUsings>
     <AssemblyName>Proxy</AssemblyName>
     <RootNamespace>ComposeNowPlugins</RootNamespace>
   </PropertyGroup>
@@ -21,8 +18,11 @@
 
   <ItemGroup>
     <ProjectReference Include="..\Application\Application.csproj" />
-    <ProjectReference Include="..\Domain\Domain.csproj" />
     <ProjectReference Include="..\Infrastructure\Infrastructure.csproj" />
   </ItemGroup>
+
+  <PropertyGroup>
+      <RootNamespace>ComposeNowPlugins</RootNamespace>
+  </PropertyGroup>
 
 </Project>

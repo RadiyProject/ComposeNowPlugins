@@ -1,6 +1,6 @@
-using ComposeNowPlugins.Transports;
+using ComposeNowPlugins.Proxy.Transports;
 
-namespace ComposeNowPlugins.Extensions;
+namespace ComposeNowPlugins.Proxy.Extensions;
 
 public static class RuntimeSessionServiceCollectionExtensions
 {

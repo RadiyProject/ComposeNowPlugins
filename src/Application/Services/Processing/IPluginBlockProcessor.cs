@@ -1,6 +1,6 @@
-using ComposeNowPlugins.Models.Ids;
+using ComposeNowPlugins.Domain.Models.Ids;
 
-namespace ComposeNowPlugins.Services.Processing;
+namespace ComposeNowPlugins.Application.Services.Processing;
 
 public interface IPluginBlockProcessor
 {

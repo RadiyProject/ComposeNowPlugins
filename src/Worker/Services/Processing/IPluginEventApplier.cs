@@ -1,7 +1,7 @@
-using ComposeNowPlugins.Models;
-using ComposeNowPlugins.Wrappers;
+using ComposeNowPlugins.Domain.Models;
+using ComposeNowPlugins.Worker.Wrappers;
 
-namespace ComposeNowPlugins.Services.Processing;
+namespace ComposeNowPlugins.Worker.Services.Processing;
 
 public interface IPluginEventApplier
 {

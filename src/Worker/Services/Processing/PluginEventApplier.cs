@@ -1,8 +1,8 @@
-using ComposeNowPlugins.Configurations;
-using ComposeNowPlugins.Models;
-using ComposeNowPlugins.Wrappers;
+using ComposeNowPlugins.Domain.Configurations;
+using ComposeNowPlugins.Domain.Models;
+using ComposeNowPlugins.Worker.Wrappers;
 
-namespace ComposeNowPlugins.Services.Processing;
+namespace ComposeNowPlugins.Worker.Services.Processing;
 
 public sealed class PluginEventApplier : IPluginEventApplier
 {

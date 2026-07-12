@@ -1,7 +1,8 @@
-using ComposeNowPlugins.Services.Processing;
-using ComposeNowPlugins.Wrappers;
+using ComposeNowPlugins.Application.Services.Processing;
+using ComposeNowPlugins.Worker.Services.Processing;
+using ComposeNowPlugins.Worker.Wrappers;
 
-namespace ComposeNowPlugins.Extensions;
+namespace ComposeNowPlugins.Worker.Extensions;
 
 public static class VstServiceCollectionExtensions
 {

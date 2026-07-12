@@ -1,7 +1,7 @@
 using System.Net.WebSockets;
-using ComposeNowPlugins.Services.Cluster;
+using ComposeNowPlugins.Infrastructure.Services.Cluster;
 
-namespace ComposeNowPlugins.Transports.WebSockets;
+namespace ComposeNowPlugins.Proxy.Transports.WebSockets;
 
 public class WebSocketTransport(
     IRuntimeSessionFactory factory,

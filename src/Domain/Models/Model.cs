@@ -1,4 +1,4 @@
-namespace ComposeNowPlugins.Models;
+namespace ComposeNowPlugins.Domain.Models;
 
 public abstract class Model<TId>(TId id)
 {

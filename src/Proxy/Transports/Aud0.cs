@@ -1,7 +1,7 @@
 using System.Buffers.Binary;
 using System.Runtime.InteropServices;
 
-namespace ComposeNowPlugins.Transports;
+namespace ComposeNowPlugins.Proxy.Transports;
 
 public static class Aud0
 {

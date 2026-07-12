@@ -1,4 +1,4 @@
-using ComposeNowPlugins.Extensions;
+using ComposeNowPlugins.Proxy.Extensions;
 
 var builder = WebApplication.CreateBuilder(args);
 

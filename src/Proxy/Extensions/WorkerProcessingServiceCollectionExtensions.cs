@@ -1,7 +1,8 @@
-using ComposeNowPlugins.Configurations;
-using ComposeNowPlugins.Services.Processing;
+using ComposeNowPlugins.Proxy.Configurations;
+using ComposeNowPlugins.Application.Services.Processing;
+using ComposeNowPlugins.Proxy.Services.Processing;
 
-namespace ComposeNowPlugins.Extensions;
+namespace ComposeNowPlugins.Proxy.Extensions;
 
 public static class WorkerProcessingServiceCollectionExtensions
 {

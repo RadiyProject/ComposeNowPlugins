@@ -1,9 +1,9 @@
-using ComposeNowPlugins.Cache;
-using ComposeNowPlugins.Exceptions;
-using ComposeNowPlugins.Models;
-using ComposeNowPlugins.Models.Ids;
+using ComposeNowPlugins.Infrastructure.Cache;
+using ComposeNowPlugins.Application.Exceptions;
+using ComposeNowPlugins.Domain.Models;
+using ComposeNowPlugins.Domain.Models.Ids;
 
-namespace ComposeNowPlugins.Repositories.Plugins;
+namespace ComposeNowPlugins.Infrastructure.Repositories.Plugins;
 
 public sealed class PluginEventRepository(ICache cache) : IPluginEventRepository
 {

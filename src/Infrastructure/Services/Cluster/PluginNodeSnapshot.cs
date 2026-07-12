@@ -1,4 +1,4 @@
-namespace ComposeNowPlugins.Services.Cluster;
+namespace ComposeNowPlugins.Infrastructure.Services.Cluster;
 
 public sealed record PluginNodeSnapshot(
     string NodeId,

@@ -1,4 +1,4 @@
-namespace ComposeNowPlugins.Transports;
+namespace ComposeNowPlugins.Proxy.Transports;
 
 public readonly record struct IncomingMessage(
     ReadOnlyMemory<byte> Payload,

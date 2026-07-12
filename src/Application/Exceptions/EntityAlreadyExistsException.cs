@@ -1,4 +1,4 @@
-namespace ComposeNowPlugins.Exceptions;
+namespace ComposeNowPlugins.Application.Exceptions;
 
 public sealed class EntityAlreadyExistsException : RepositoryException
 {

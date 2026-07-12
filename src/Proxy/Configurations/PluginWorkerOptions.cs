@@ -1,4 +1,4 @@
-namespace ComposeNowPlugins.Configurations;
+namespace ComposeNowPlugins.Proxy.Configurations;
 
 public sealed class PluginWorkerOptions
 {

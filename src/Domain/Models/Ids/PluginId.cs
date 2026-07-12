@@ -1,6 +1,6 @@
 using System.Text.Json.Serialization;
 
-namespace ComposeNowPlugins.Models.Ids;
+namespace ComposeNowPlugins.Domain.Models.Ids;
 
 [JsonConverter(typeof(IdJsonConverter<PluginId, string>))]
 public class PluginId : Id<string>

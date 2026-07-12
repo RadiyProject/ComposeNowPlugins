@@ -1,6 +1,6 @@
 using System.Collections.Concurrent;
 
-namespace ComposeNowPlugins.Services.Processing;
+namespace ComposeNowPlugins.Worker.Services.Processing;
 
 public sealed class PluginProcessingGate : IPluginProcessingGate
 {

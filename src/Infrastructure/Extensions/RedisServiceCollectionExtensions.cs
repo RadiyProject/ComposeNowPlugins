@@ -1,7 +1,7 @@
-using ComposeNowPlugins.Cache;
+using ComposeNowPlugins.Infrastructure.Cache;
 using StackExchange.Redis;
 
-namespace ComposeNowPlugins.Extensions;
+namespace ComposeNowPlugins.Infrastructure.Extensions;
 
 public static class RedisServiceCollectionExtensions
 {

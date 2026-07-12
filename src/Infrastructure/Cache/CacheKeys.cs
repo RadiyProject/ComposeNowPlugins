@@ -1,6 +1,6 @@
-using ComposeNowPlugins.Models.Ids;
+using ComposeNowPlugins.Domain.Models.Ids;
 
-namespace ComposeNowPlugins.Cache;
+namespace ComposeNowPlugins.Infrastructure.Cache;
 
 public static class CacheKeys
 {

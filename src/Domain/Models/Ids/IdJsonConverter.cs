@@ -2,7 +2,7 @@ using System.Reflection;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
-namespace ComposeNowPlugins.Models.Ids;
+namespace ComposeNowPlugins.Domain.Models.Ids;
 
 public class IdJsonConverter<TId, TValue> : JsonConverter<TId>
     where TId : Id<TValue>

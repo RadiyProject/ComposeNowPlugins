@@ -1,7 +1,7 @@
 using System.Text.Json;
 using StackExchange.Redis;
 
-namespace ComposeNowPlugins.Cache;
+namespace ComposeNowPlugins.Infrastructure.Cache;
 
 public class RedisCache(IConnectionMultiplexer connectionMultiplexer) : ICache
 {

@@ -1,7 +1,7 @@
 using System.Text.Json;
 using StackExchange.Redis;
 
-namespace ComposeNowPlugins.Services.Cluster;
+namespace ComposeNowPlugins.Infrastructure.Services.Cluster;
 
 public sealed class RedisPluginLeaseValidator(
     IConnectionMultiplexer redis,

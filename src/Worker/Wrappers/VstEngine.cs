@@ -1,6 +1,6 @@
-using ComposeNowPlugins.Configurations;
+using ComposeNowPlugins.Domain.Configurations;
 
-namespace ComposeNowPlugins.Wrappers;
+namespace ComposeNowPlugins.Worker.Wrappers;
 
 public sealed class VstEngine : IAsyncDisposable
 {

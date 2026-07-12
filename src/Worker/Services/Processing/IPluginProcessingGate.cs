@@ -1,4 +1,4 @@
-namespace ComposeNowPlugins.Services.Processing;
+namespace ComposeNowPlugins.Worker.Services.Processing;
 
 public interface IPluginProcessingGate
 {

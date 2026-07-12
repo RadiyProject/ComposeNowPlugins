@@ -1,6 +1,6 @@
-using ComposeNowPlugins.Models.Ids;
+using ComposeNowPlugins.Domain.Models.Ids;
 
-namespace ComposeNowPlugins.Transports;
+namespace ComposeNowPlugins.Proxy.Transports;
 
 public sealed class RuntimeSessionFactory(IServiceProvider serviceProvider,
     ILogger<RuntimeSessionFactory> logger) : IRuntimeSessionFactory

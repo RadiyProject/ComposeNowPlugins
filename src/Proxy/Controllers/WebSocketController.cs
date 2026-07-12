@@ -1,7 +1,7 @@
-using ComposeNowPlugins.Transports;
+using ComposeNowPlugins.Proxy.Transports;
 using Microsoft.AspNetCore.Mvc;
 
-namespace ComposeNowPlugins.Controllers;
+namespace ComposeNowPlugins.Proxy.Controllers;
 
 [ApiController]
 public class WebSocketController(IRealtimeTransport transport) : ControllerBase

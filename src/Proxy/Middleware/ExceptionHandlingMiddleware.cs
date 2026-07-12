@@ -1,6 +1,6 @@
-using ComposeNowPlugins.Exceptions;
+using ComposeNowPlugins.Application.Exceptions;
 
-namespace ComposeNowPlugins.Middleware;
+namespace ComposeNowPlugins.Proxy.Middleware;
 
 public sealed class ExceptionHandlingMiddleware(
     RequestDelegate next,

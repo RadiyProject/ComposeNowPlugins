@@ -1,4 +1,4 @@
-namespace ComposeNowPlugins.Services.Processing;
+namespace ComposeNowPlugins.Application.Services.Processing;
 
 public sealed record PluginBlockProcessResult(
     ReadOnlyMemory<float> Audio,

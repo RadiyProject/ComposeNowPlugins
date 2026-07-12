@@ -1,6 +1,6 @@
 using System.Diagnostics;
 
-namespace ComposeNowPlugins.Services.Cluster;
+namespace ComposeNowPlugins.Infrastructure.Services.Cluster;
 
 public sealed class PluginNodeState(IHostApplicationLifetime lifetime) : IPluginNodeState
 {

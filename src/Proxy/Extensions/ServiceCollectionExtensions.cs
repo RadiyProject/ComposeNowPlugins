@@ -1,4 +1,4 @@
-namespace ComposeNowPlugins.Extensions;
+namespace ComposeNowPlugins.Proxy.Extensions;
 
 public static class ServiceCollectionExtensions
 {
@@ -7,16 +7,6 @@ public static class ServiceCollectionExtensions
         IConfiguration configuration
     )
     {
-        services.AddControllers();
-
-        services.AddPluginCatalog(configuration);
-        services.AddRepositories();
-        services.AddRedisCache();
-        services.AddPluginClusterServices();
-        services.AddRuntimeSessions();
-        services.AddRealtimeTransports();
-        services.AddWorkerProcessingClient(configuration);
-
-        return services;
+        return services.AddProxyApplication(configuration);
     }
 }

@@ -1,6 +1,6 @@
-using ComposeNowPlugins.Services.Cluster;
+using ComposeNowPlugins.Infrastructure.Services.Cluster;
 
-namespace ComposeNowPlugins.Extensions;
+namespace ComposeNowPlugins.Infrastructure.Extensions;
 
 public static class ClusterServiceCollectionExtensions
 {

@@ -1,11 +1,12 @@
 using System.Buffers;
-using ComposeNowPlugins.Configurations;
-using ComposeNowPlugins.Models;
-using ComposeNowPlugins.Models.Ids;
-using ComposeNowPlugins.Repositories.Plugins;
-using ComposeNowPlugins.Wrappers;
+using ComposeNowPlugins.Domain.Configurations;
+using ComposeNowPlugins.Domain.Models;
+using ComposeNowPlugins.Domain.Models.Ids;
+using ComposeNowPlugins.Application.Repositories.Plugins;
+using ComposeNowPlugins.Application.Services.Processing;
+using ComposeNowPlugins.Worker.Wrappers;
 
-namespace ComposeNowPlugins.Services.Processing;
+namespace ComposeNowPlugins.Worker.Services.Processing;
 
 public sealed class PluginBlockProcessor(
     IVstEngineFactory vstEngineFactory,

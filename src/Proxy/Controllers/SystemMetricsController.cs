@@ -1,7 +1,7 @@
 using System.Diagnostics;
 using Microsoft.AspNetCore.Mvc;
 
-namespace ComposeNowPlugins.Controllers;
+namespace ComposeNowPlugins.Proxy.Controllers;
 
 [ApiController]
 [Route("internal/system/metrics")]

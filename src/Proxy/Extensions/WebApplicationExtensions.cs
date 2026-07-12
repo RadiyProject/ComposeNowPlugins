@@ -1,7 +1,7 @@
-using ComposeNowPlugins.Services.Cluster;
-using ComposeNowPlugins.Middleware;
+using ComposeNowPlugins.Infrastructure.Services.Cluster;
+using ComposeNowPlugins.Proxy.Middleware;
 
-namespace ComposeNowPlugins.Extensions;
+namespace ComposeNowPlugins.Proxy.Extensions;
 
 public static class WebApplicationExtensions
 {

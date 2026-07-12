@@ -1,7 +1,8 @@
-using ComposeNowPlugins.Configurations;
-using ComposeNowPlugins.Services.Plugins;
+using ComposeNowPlugins.Domain.Configurations;
+using ComposeNowPlugins.Application.Services.Plugins;
+using ComposeNowPlugins.Infrastructure.Services.Plugins;
 
-namespace ComposeNowPlugins.Extensions;
+namespace ComposeNowPlugins.Infrastructure.Extensions;
 
 public static class PluginCatalogServiceCollectionExtensions
 {

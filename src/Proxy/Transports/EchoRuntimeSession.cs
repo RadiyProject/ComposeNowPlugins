@@ -1,4 +1,4 @@
-namespace ComposeNowPlugins.Transports;
+namespace ComposeNowPlugins.Proxy.Transports;
 
 public sealed class EchoRuntimeSession(ILogger<EchoRuntimeSession> log, IHostEnvironment env) : IRuntimeSession
 {

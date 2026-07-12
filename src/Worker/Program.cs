@@ -1,16 +1,12 @@
-using ComposeNowPlugins.Extensions;
-using Worker.Services;
+using ComposeNowPlugins.Worker.Extensions;
+using ComposeNowPlugins.Worker.Services;
 
 var builder = WebApplication.CreateBuilder(args);
 
 builder.Configuration
     .AddJsonFile("plugins.catalog.json", optional: false, reloadOnChange: true);
 
-builder.Services.AddPluginCatalog(builder.Configuration);
-builder.Services.AddRepositories();
-builder.Services.AddRedisCache();
-builder.Services.AddVstProcessing();
-builder.Services.AddGrpc();
+builder.Services.AddWorkerApplication(builder.Configuration);
 
 var app = builder.Build();
 

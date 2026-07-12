@@ -1,9 +1,9 @@
-using ComposeNowPlugins.Models.Ids;
-using ComposeNowPlugins.Services.Processing;
+using ComposeNowPlugins.Domain.Models.Ids;
+using ComposeNowPlugins.Application.Services.Processing;
 using ComposeNowPlugins.Worker;
 using Grpc.Core;
 
-namespace Worker.Services;
+namespace ComposeNowPlugins.Worker.Services;
 
 public sealed class PluginWorkerService(
     IPluginBlockProcessor pluginBlockProcessor

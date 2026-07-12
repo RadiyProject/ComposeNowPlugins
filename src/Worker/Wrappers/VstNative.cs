@@ -2,7 +2,7 @@ using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Runtime.CompilerServices;
 
-namespace ComposeNowPlugins.Wrappers;
+namespace ComposeNowPlugins.Worker.Wrappers;
 
 internal static partial class VstNative
 {

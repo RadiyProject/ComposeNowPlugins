@@ -1,4 +1,4 @@
-namespace ComposeNowPlugins.Configurations;
+namespace ComposeNowPlugins.Domain.Configurations;
 
 public enum PluginType
 {

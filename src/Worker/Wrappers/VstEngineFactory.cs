@@ -1,8 +1,8 @@
 using System.Collections.Concurrent;
-using ComposeNowPlugins.Models.Ids;
-using ComposeNowPlugins.Services.Plugins;
+using ComposeNowPlugins.Domain.Models.Ids;
+using ComposeNowPlugins.Application.Services.Plugins;
 
-namespace ComposeNowPlugins.Wrappers;
+namespace ComposeNowPlugins.Worker.Wrappers;
 
 public sealed class VstEngineFactory(IPluginCatalog pluginCatalog, ILoggerFactory loggerFactory, IConfiguration cfg) : IVstEngineFactory
 {

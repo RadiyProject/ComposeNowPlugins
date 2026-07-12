@@ -1,7 +1,7 @@
-using ComposeNowPlugins.Configurations;
-using ComposeNowPlugins.Models.Ids;
+using ComposeNowPlugins.Domain.Configurations;
+using ComposeNowPlugins.Domain.Models.Ids;
 
-namespace ComposeNowPlugins.Models;
+namespace ComposeNowPlugins.Domain.Models;
 
 public sealed class PluginEvent
 {

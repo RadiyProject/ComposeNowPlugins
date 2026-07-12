@@ -2,7 +2,7 @@ using System.Buffers;
 using System.Net.WebSockets;
 using System.Runtime.CompilerServices;
 
-namespace ComposeNowPlugins.Transports.WebSockets;
+namespace ComposeNowPlugins.Proxy.Transports.WebSockets;
 
 public class WebSocketChannel(WebSocket ws) : IRuntimeChannel
 {

@@ -1,6 +1,7 @@
-using ComposeNowPlugins.Repositories.Plugins;
+using ComposeNowPlugins.Application.Repositories.Plugins;
+using ComposeNowPlugins.Infrastructure.Repositories.Plugins;
 
-namespace ComposeNowPlugins.Extensions;
+namespace ComposeNowPlugins.Infrastructure.Extensions;
 
 public static class RepositoryServiceCollectionExtensions
 {

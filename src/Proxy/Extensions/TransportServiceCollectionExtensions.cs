@@ -1,7 +1,7 @@
-using ComposeNowPlugins.Transports;
-using ComposeNowPlugins.Transports.WebSockets;
+using ComposeNowPlugins.Proxy.Transports;
+using ComposeNowPlugins.Proxy.Transports.WebSockets;
 
-namespace ComposeNowPlugins.Extensions;
+namespace ComposeNowPlugins.Proxy.Extensions;
 
 public static class TransportServiceCollectionExtensions
 {

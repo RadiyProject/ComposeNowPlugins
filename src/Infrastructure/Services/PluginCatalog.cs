@@ -1,7 +1,7 @@
 using Microsoft.Extensions.Options;
-using ComposeNowPlugins.Configurations;
+using ComposeNowPlugins.Domain.Configurations;
 
-namespace ComposeNowPlugins.Services.Plugins;
+namespace ComposeNowPlugins.Infrastructure.Services.Plugins;
 
 public sealed class PluginCatalog(IOptionsMonitor<PluginCatalogOptions> options) : IPluginCatalog
 {

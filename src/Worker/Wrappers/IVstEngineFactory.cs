@@ -1,6 +1,6 @@
-using ComposeNowPlugins.Models.Ids;
+using ComposeNowPlugins.Domain.Models.Ids;
 
-namespace ComposeNowPlugins.Wrappers;
+namespace ComposeNowPlugins.Worker.Wrappers;
 
 public interface IVstEngineFactory
 {

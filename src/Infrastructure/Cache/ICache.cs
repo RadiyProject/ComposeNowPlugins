@@ -1,4 +1,4 @@
-namespace ComposeNowPlugins.Cache;
+namespace ComposeNowPlugins.Infrastructure.Cache;
 
 public interface ICache
 {

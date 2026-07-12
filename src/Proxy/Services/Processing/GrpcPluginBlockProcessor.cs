@@ -1,10 +1,11 @@
-using ComposeNowPlugins.Configurations;
-using ComposeNowPlugins.Models.Ids;
+using ComposeNowPlugins.Proxy.Configurations;
+using ComposeNowPlugins.Application.Services.Processing;
+using ComposeNowPlugins.Domain.Models.Ids;
 using ComposeNowPlugins.WorkerClient;
 using Grpc.Net.Client;
 using Microsoft.Extensions.Options;
 
-namespace ComposeNowPlugins.Services.Processing;
+namespace ComposeNowPlugins.Proxy.Services.Processing;
 
 public sealed class GrpcPluginBlockProcessor : IPluginBlockProcessor
 {

@@ -1,4 +1,4 @@
-namespace ComposeNowPlugins.Models.Ids;
+namespace ComposeNowPlugins.Domain.Models.Ids;
 
 public abstract class Id<T>(T id)
 {

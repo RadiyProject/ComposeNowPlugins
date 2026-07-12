@@ -1,6 +1,6 @@
-using ComposeNowPlugins.Configurations;
+using ComposeNowPlugins.Domain.Configurations;
 
-namespace ComposeNowPlugins.Services.Plugins;
+namespace ComposeNowPlugins.Application.Services.Plugins;
 
 public interface IPluginCatalog
 {

@@ -1,6 +1,6 @@
-using ComposeNowPlugins.Models;
+using ComposeNowPlugins.Domain.Models;
 
-namespace ComposeNowPlugins.Repositories;
+namespace ComposeNowPlugins.Application.Repositories;
 
 public interface IRepository<TModel, TId>
     where TModel : Model<TId>

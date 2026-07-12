@@ -1,7 +1,7 @@
-using ComposeNowPlugins.Models;
-using ComposeNowPlugins.Models.Ids;
+using ComposeNowPlugins.Domain.Models;
+using ComposeNowPlugins.Domain.Models.Ids;
 
-namespace ComposeNowPlugins.Repositories.Plugins;
+namespace ComposeNowPlugins.Application.Repositories.Plugins;
 
 public interface IPluginRepository : IRepository<Plugin, PluginId>
 {
