@@ -1,0 +1,66 @@
+name: compose-now-plugins
+
+services:
+  plugins-proxy:
+    build:
+      context: ..
+      dockerfile: _docker/Dockerfile/Proxy.dockerfile
+      target: runtime
+    image: compose-now-proxy:latest
+    restart: always
+    networks:
+      - radx
+    depends_on:
+      redis:
+        condition: service_started
+      plugin-worker:
+        condition: service_started
+    env_file:
+      - ../.env
+    environment:
+      ASPNETCORE_ENVIRONMENT: Production
+      PluginWorker__Address: http://plugin-worker:5002
+    expose:
+      - 5001
+    volumes:
+      - ../logs:/logs
+
+  plugin-worker:
+    build:
+      context: ..
+      dockerfile: _docker/Dockerfile/Worker.dockerfile
+      target: runtime
+    image: compose-now-worker:latest
+    restart: always
+    networks:
+      - radx
+    depends_on:
+      redis:
+        condition: service_started
+    env_file:
+      - ../.env
+    environment:
+      ASPNETCORE_ENVIRONMENT: Production
+    expose:
+      - 5002
+    volumes:
+      - ../vst_builds:/plugins:ro
+      - ../logs:/logs
+
+  redis:
+    restart: always
+    image: redis:8.6.1
+    volumes:
+      - ../redis:/data
+    networks:
+      - radx
+    expose:
+      - 6379
+    environment:
+      - REDIS_PASSWORD=${REDIS_PASSWORD}
+    command: redis-server --requirepass ${REDIS_PASSWORD}
+
+networks:
+  radx:
+    name: radx
+    external: true

@@ -1,0 +1,23 @@
+syntax = "proto3";
+
+option csharp_namespace = "ComposeNowPlugins.WorkerClient";
+
+package plugin_worker;
+
+service PluginWorker {
+  rpc ProcessBlock (ProcessBlockRequest) returns (ProcessBlockReply);
+}
+
+message ProcessBlockRequest {
+  string plugin_id = 1;
+  uint64 seq = 2;
+  int32 frames = 3;
+  bool offline = 4;
+  repeated float input_audio = 5;
+  bool has_input_audio = 6;
+}
+
+message ProcessBlockReply {
+  repeated float audio = 1;
+  bool should_send = 2;
+}

@@ -1,25 +1,31 @@
+-include .env
+
 PLUGIN ?= none
+ENV ?= local
+COMPOSE_FILE := docker-compose.${ENV}.yml
+ENV_FILE := ../.env
+DOCKER_COMPOSE := docker compose --env-file ${ENV_FILE}
 
 up:
-	cd _docker && docker compose --env-file ../.env up -d --no-build
+	cd _docker && ${DOCKER_COMPOSE} -f ${COMPOSE_FILE} up -d --no-build
 
 down:
-	cd _docker && docker compose --env-file ../.env down
+	cd _docker && ${DOCKER_COMPOSE} -f ${COMPOSE_FILE} down
 
 restart:
-	make down
-	make up
+	make down ENV=${ENV}
+	make up ENV=${ENV}
 
 restore:
-	find app -maxdepth 1 -type f -name "*.csproj" -exec dotnet restore {} \;
+	dotnet restore src/Proxy/Proxy.csproj
+	dotnet restore src/Worker/Worker.csproj
 
 rebuild:
-	cd _docker && docker compose --env-file ../.env build
+	cd _docker && ${DOCKER_COMPOSE} -f ${COMPOSE_FILE} build
 
 shell:
-	cd _docker && docker compose --env-file ../.env exec plugins bash
+	cd _docker && ${DOCKER_COMPOSE} -f ${COMPOSE_FILE} exec plugins-proxy bash
 
 build:
-#--build
-	- cd _docker && docker compose --env-file ../.env -f docker-compose.build.yml up --no-build --abort-on-container-exit
-	cd _docker && docker compose --env-file ../.env -f docker-compose.build.yml down
+	- cd _docker && ${DOCKER_COMPOSE} -f docker-compose.artifacts.yml up --build --abort-on-container-exit
+	cd _docker && ${DOCKER_COMPOSE} -f docker-compose.artifacts.yml down

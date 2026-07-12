@@ -1,0 +1,78 @@
+name: compose-now-plugins
+
+services:
+  plugins-proxy:
+    build:
+      context: ..
+      dockerfile: _docker/Dockerfile/Proxy.dockerfile
+      target: dev
+    image: compose-now-proxy-dev:dev
+    restart: always
+    networks:
+      - radx
+    depends_on:
+      redis:
+        condition: service_started
+      plugin-worker:
+        condition: service_started
+    env_file:
+      - ../.env
+    environment:
+      DOTNET_USE_POLLING_FILE_WATCHER: ${DOTNET_USE_POLLING_FILE_WATCHER}
+      DOTNET_WATCH_SUPPRESS_LAUNCH_BROWSER: ${DOTNET_WATCH_SUPPRESS_LAUNCH_BROWSER}
+      ASPNETCORE_ENVIRONMENT: ${APP_MODE}
+      DOTNET_WATCH_RESTART_ON_RUDE_EDIT: "true"
+      PluginWorker__Address: http://plugin-worker:5002
+    expose:
+      - 5001
+    working_dir: /workspace
+    command: ["dotnet", "watch", "run", "--project", "src/Proxy"]
+    volumes:
+      - ..:/workspace
+      - ../logs:/logs
+
+  plugin-worker:
+    build:
+      context: ..
+      dockerfile: _docker/Dockerfile/Worker.dockerfile
+      target: dev
+    image: compose-now-worker-dev:dev
+    restart: on-failure
+    networks:
+      - radx
+    depends_on:
+      redis:
+        condition: service_started
+    env_file:
+      - ../.env
+    environment:
+      DOTNET_USE_POLLING_FILE_WATCHER: ${DOTNET_USE_POLLING_FILE_WATCHER}
+      DOTNET_WATCH_SUPPRESS_LAUNCH_BROWSER: ${DOTNET_WATCH_SUPPRESS_LAUNCH_BROWSER}
+      ASPNETCORE_ENVIRONMENT: ${APP_MODE}
+      DOTNET_WATCH_RESTART_ON_RUDE_EDIT: "true"
+    expose:
+      - 5002
+    working_dir: /workspace
+    command: ["dotnet", "watch", "run", "--project", "src/Worker"]
+    volumes:
+      - ..:/workspace
+      - ../vst_builds:/plugins:ro
+      - ../logs:/logs
+
+  redis:
+    restart: always
+    image: redis:8.6.1
+    volumes:
+      - ../redis:/data
+    networks:
+      - radx
+    expose:
+      - 6379
+    environment:
+      - REDIS_PASSWORD=${REDIS_PASSWORD}
+    command: redis-server --requirepass ${REDIS_PASSWORD}
+
+networks:
+  radx:
+    name: radx
+    external: true
