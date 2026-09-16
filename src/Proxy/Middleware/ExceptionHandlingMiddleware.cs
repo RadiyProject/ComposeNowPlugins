@@ -4,11 +4,13 @@ namespace ComposeNowPlugins.Proxy.Middleware;
 
 public sealed class ExceptionHandlingMiddleware(
     RequestDelegate next,
-    ILogger<ExceptionHandlingMiddleware> logger
+    ILogger<ExceptionHandlingMiddleware> logger,
+    IHostEnvironment environment
 )
 {
     private readonly RequestDelegate _next = next;
     private readonly ILogger<ExceptionHandlingMiddleware> _logger = logger;
+    private readonly IHostEnvironment _environment = environment;
 
     public async Task InvokeAsync(HttpContext context)
     {
@@ -31,10 +33,11 @@ public sealed class ExceptionHandlingMiddleware(
 
             context.Response.Clear();
             context.Response.ContentType = "text/plain; charset=utf-8";
-            context.Response.StatusCode = GetStatusCode(exception);
+            int statusCode = GetStatusCode(exception);
+            context.Response.StatusCode = statusCode;
 
             await context.Response.WriteAsync(
-                exception.Message,
+                GetResponseMessage(exception, statusCode),
                 context.RequestAborted
             );
         }
@@ -50,5 +53,12 @@ public sealed class ExceptionHandlingMiddleware(
             AppException => StatusCodes.Status400BadRequest,
             _ => StatusCodes.Status500InternalServerError
         };
+    }
+
+    private string GetResponseMessage(Exception exception, int statusCode)
+    {
+        return statusCode >= StatusCodes.Status500InternalServerError && !_environment.IsDevelopment()
+            ? "An internal server error occurred."
+            : exception.Message;
     }
 }

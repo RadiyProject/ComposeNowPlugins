@@ -10,7 +10,8 @@ public static class WorkerApplicationServiceCollectionExtensions
     )
     {
         services.AddInfrastructure(configuration);
-        services.AddVstProcessing();
+        services.AddPluginWorkerClusterServices();
+        services.AddVstProcessing(configuration);
         services.AddGrpc();
 
         return services;

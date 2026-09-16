@@ -7,6 +7,7 @@ public interface IPluginEventRepository
 {
     public Task AddBlockEventAsync(
         PluginId pluginId,
+        ulong epoch,
         ulong seq,
         PluginEvent pluginEvent
     );
@@ -16,25 +17,15 @@ public interface IPluginEventRepository
         PluginEvent pluginEvent
     );
 
-    public Task<IReadOnlyList<PluginEvent>> GetBlockEventsAsync(
+    public Task<IReadOnlyList<PluginEventDelivery>> ReadBlockEventsAsync(
         PluginId pluginId,
-        ulong seq
+        ulong epoch,
+        ulong seq,
+        string consumerId
     );
 
-    public Task<IReadOnlyList<PluginEvent>> GetControlEventsAsync(
-        PluginId pluginId
-    );
-
-    public Task DeleteBlockEventsAsync(
+    public Task<IReadOnlyList<PluginEventDelivery>> ReadControlEventsAsync(
         PluginId pluginId,
-        ulong seq
-    );
-
-    public Task DeleteControlEventsAsync(
-        PluginId pluginId
-    );
-
-    public Task<IReadOnlyList<PluginEvent>> PopControlEventsAsync(
-        PluginId pluginId
+        string consumerId
     );
 }

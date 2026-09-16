@@ -1,7 +1,14 @@
 <Project>
   <PropertyGroup>
     <TargetFramework>net9.0</TargetFramework>
+    <RootNamespace>ComposeNowPlugins.$(MSBuildProjectName)</RootNamespace>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
+    <DefaultItemExcludes>$(DefaultItemExcludes);bin/**;obj/**</DefaultItemExcludes>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(CONTAINER_ARTIFACTS_ROOT)' != ''">
+    <BaseIntermediateOutputPath>$(CONTAINER_ARTIFACTS_ROOT)/obj/$(MSBuildProjectName)/</BaseIntermediateOutputPath>
+    <BaseOutputPath>$(CONTAINER_ARTIFACTS_ROOT)/bin/$(MSBuildProjectName)/</BaseOutputPath>
   </PropertyGroup>
 </Project>

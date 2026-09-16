@@ -1,17 +1,16 @@
 using System.Globalization;
-using ComposeNowPlugins.Application.Repositories.Plugins;
-using ComposeNowPlugins.Domain.Models;
+using ComposeNowPlugins.Application.Services.Plugins;
 using ComposeNowPlugins.Domain.Models.Ids;
 
 namespace ComposeNowPlugins.Proxy.Transports;
 
 public sealed class PluginEventCommandHandler(
     PluginId pluginId,
-    IPluginEventRepository pluginEventRepository
+    IPluginEventService pluginEventService
 )
 {
     private readonly PluginId _pluginId = pluginId;
-    private readonly IPluginEventRepository _pluginEventRepository = pluginEventRepository;
+    private readonly IPluginEventService _pluginEventService = pluginEventService;
 
     public async Task<bool> TryHandleAsync(string text)
     {
@@ -67,13 +66,10 @@ public sealed class PluginEventCommandHandler(
             );
         }
 
-        await _pluginEventRepository.AddControlEventAsync(
+        await _pluginEventService.AddNoteOnControlAsync(
             _pluginId,
-            PluginEvent.NoteOn(
-                _pluginId,
-                note,
-                velocity
-            )
+            note,
+            velocity
         );
 
         return true;
@@ -101,12 +97,9 @@ public sealed class PluginEventCommandHandler(
             return true;
         }
 
-        await _pluginEventRepository.AddControlEventAsync(
+        await _pluginEventService.AddNoteOffControlAsync(
             _pluginId,
-            PluginEvent.NoteOff(
-                _pluginId,
-                note
-            )
+            note
         );
 
         return true;
@@ -144,13 +137,10 @@ public sealed class PluginEventCommandHandler(
             return true;
         }
 
-        await _pluginEventRepository.AddControlEventAsync(
+        await _pluginEventService.AddParameterControlAsync(
             _pluginId,
-            PluginEvent.Param(
-                _pluginId,
-                parameterId,
-                value
-            )
+            parameterId,
+            value
         );
 
         return true;
@@ -163,10 +153,7 @@ public sealed class PluginEventCommandHandler(
             return false;
         }
 
-        await _pluginEventRepository.AddControlEventAsync(
-            _pluginId,
-            PluginEvent.Panic(_pluginId)
-        );
+        await _pluginEventService.AddPanicControlAsync(_pluginId);
 
         return true;
     }

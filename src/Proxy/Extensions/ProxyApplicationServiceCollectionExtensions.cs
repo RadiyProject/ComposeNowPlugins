@@ -11,9 +11,11 @@ public static class ProxyApplicationServiceCollectionExtensions
     {
         services.AddControllers();
         services.AddInfrastructure(configuration);
+        services.AddPluginClusterServices();
+        services.AddPluginWorkerDiscovery();
         services.AddRuntimeSessions();
         services.AddRealtimeTransports();
-        services.AddWorkerProcessingClient(configuration);
+        services.AddWorkerProcessingClient();
 
         return services;
     }

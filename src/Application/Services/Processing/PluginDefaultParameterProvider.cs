@@ -1,4 +1,4 @@
-namespace ComposeNowPlugins.Worker.Services.Processing;
+namespace ComposeNowPlugins.Application.Services.Processing;
 
 public sealed class PluginDefaultParameterProvider : IPluginDefaultParameterProvider
 {

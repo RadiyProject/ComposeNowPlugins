@@ -1,4 +1,6 @@
 using System.Diagnostics;
+using System.Security.Cryptography;
+using System.Text;
 using Microsoft.AspNetCore.Mvc;
 
 namespace ComposeNowPlugins.Proxy.Controllers;
@@ -11,9 +13,9 @@ public sealed class SystemMetricsController(IConfiguration configuration) : Cont
     public IActionResult Get()
     {
         var expected = configuration["Infrastructure:MetricsKey"]
-            ?? Environment.GetEnvironmentVariable("COMPOSE_NOW_METRICS_KEY")
-            ?? "compose-now-development-metrics";
-        if (Request.Headers["X-ComposeNow-Metrics-Key"] != expected)
+            ?? Environment.GetEnvironmentVariable("COMPOSE_NOW_METRICS_KEY");
+        string provided = Request.Headers["X-ComposeNow-Metrics-Key"].ToString();
+        if (string.IsNullOrWhiteSpace(expected) || !KeysMatch(provided, expected))
         {
             return NotFound();
         }
@@ -33,7 +35,14 @@ public sealed class SystemMetricsController(IConfiguration configuration) : Cont
             memoryMb = process.WorkingSet64 / 1024d / 1024d,
             queueLength = 0,
             uptimeSeconds = uptime.TotalSeconds,
-            details = $"{process.Threads.Count} потоков · {Environment.ProcessorCount} CPU"
+            details = $"{process.Threads.Count} threads · {Environment.ProcessorCount} CPU"
         });
+    }
+
+    private static bool KeysMatch(string provided, string expected)
+    {
+        byte[] providedHash = SHA256.HashData(Encoding.UTF8.GetBytes(provided));
+        byte[] expectedHash = SHA256.HashData(Encoding.UTF8.GetBytes(expected));
+        return CryptographicOperations.FixedTimeEquals(providedHash, expectedHash);
     }
 }

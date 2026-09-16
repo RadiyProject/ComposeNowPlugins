@@ -1,4 +1,5 @@
 using System.Net.WebSockets;
+using System.Text;
 using ComposeNowPlugins.Infrastructure.Services.Cluster;
 
 namespace ComposeNowPlugins.Proxy.Transports.WebSockets;
@@ -7,13 +8,15 @@ public class WebSocketTransport(
     IRuntimeSessionFactory factory,
     IPluginNodeState nodeState,
     IPluginLeaseValidator leaseValidator,
-    ILogger<WebSocketTransport> log
+    ILogger<WebSocketTransport> log,
+    IHostEnvironment environment
 ) : IRealtimeTransport
 {
     private readonly IRuntimeSessionFactory _factory = factory;
     private readonly IPluginNodeState _nodeState = nodeState;
     private readonly IPluginLeaseValidator _leaseValidator = leaseValidator;
     private readonly ILogger<WebSocketTransport> _log = log;
+    private readonly IHostEnvironment _environment = environment;
 
     public async Task ConnectAsync(HttpContext context, CancellationToken cancellationToken)
     {
@@ -48,10 +51,10 @@ public class WebSocketTransport(
 
             if (!await _leaseValidator.ValidateAsync(leaseId, pluginName, context.RequestAborted))
             {
-                await webSocket.CloseAsync(
+                await TryCloseOutputAsync(
+                    webSocket,
                     WebSocketCloseStatus.PolicyViolation,
-                    "invalid lease",
-                    context.RequestAborted
+                    "invalid lease"
                 );
                 return;
             }
@@ -66,8 +69,20 @@ public class WebSocketTransport(
         }
         catch (WebSocketException ex)
         {
-            // клиент мог закрыться без рукопожатия — не считаем это аварией
-            _log.LogWarning(ex, "WS transport error");
+            _log.LogDebug(ex, "WebSocket connection ended.");
+        }
+        catch (MessageTooLargeException exception)
+        {
+            _log.LogWarning(exception, "WebSocket message limit exceeded.");
+
+            if (webSocket is not null)
+            {
+                await TryCloseOutputAsync(
+                    webSocket,
+                    WebSocketCloseStatus.MessageTooBig,
+                    ToCloseDescription(exception.Message)
+                );
+            }
         }
         catch (Exception exception)
         {
@@ -76,16 +91,19 @@ public class WebSocketTransport(
                 "WS session failed."
             );
 
-            if (webSocket?.State is WebSocketState.Open or WebSocketState.CloseReceived)
+            if (webSocket is not null)
             {
-                await webSocket.CloseAsync(
+                await TryCloseOutputAsync(
+                    webSocket,
                     WebSocketCloseStatus.InternalServerError,
-                    ToCloseDescription(exception.Message),
-                    context.RequestAborted
+                    ToCloseDescription(
+                        _environment.IsDevelopment()
+                            ? exception.Message
+                            : "An internal server error occurred."
+                    )
                 );
             }
         }
-        // using сам закроет, но если вдруг мы всё ещё открыты — отправим финальный close
         finally
         {
             if (acquired)
@@ -93,13 +111,38 @@ public class WebSocketTransport(
                 _nodeState.ReleaseSession();
             }
 
-            if (webSocket?.State is WebSocketState.Open or WebSocketState.CloseReceived)
+            if (webSocket is not null)
             {
-                try { await webSocket.CloseAsync(WebSocketCloseStatus.NormalClosure, "bye", cancellationToken); }
-                catch { /* ignore */ }
+                await TryCloseOutputAsync(webSocket, WebSocketCloseStatus.NormalClosure, "bye");
             }
 
             webSocket?.Dispose();
+        }
+    }
+
+    private async Task TryCloseOutputAsync(
+        WebSocket webSocket,
+        WebSocketCloseStatus closeStatus,
+        string description
+    )
+    {
+        if (webSocket.State is not (WebSocketState.Open or WebSocketState.CloseReceived))
+        {
+            return;
+        }
+
+        try
+        {
+            await webSocket.CloseOutputAsync(closeStatus, description, CancellationToken.None);
+        }
+        catch (Exception exception) when (
+            exception is WebSocketException
+                or OperationCanceledException
+                or ObjectDisposedException
+                or InvalidOperationException
+        )
+        {
+            _log.LogDebug(exception, "WebSocket closed before the close frame could be sent.");
         }
     }
 
@@ -107,11 +150,24 @@ public class WebSocketTransport(
     {
         const int maxCloseDescriptionLength = 120;
 
-        if (message.Length <= maxCloseDescriptionLength)
+        if (Encoding.UTF8.GetByteCount(message) <= maxCloseDescriptionLength)
         {
             return message;
         }
 
-        return message[..maxCloseDescriptionLength];
+        var result = new StringBuilder(message.Length);
+        int byteCount = 0;
+        foreach (Rune rune in message.EnumerateRunes())
+        {
+            if (byteCount + rune.Utf8SequenceLength > maxCloseDescriptionLength)
+            {
+                break;
+            }
+
+            result.Append(rune.ToString());
+            byteCount += rune.Utf8SequenceLength;
+        }
+
+        return result.ToString();
     }
 }

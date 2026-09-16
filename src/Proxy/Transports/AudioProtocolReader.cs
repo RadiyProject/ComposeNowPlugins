@@ -40,6 +40,15 @@ public static class AudioProtocolReader
             return true;
         }
 
+        if (sampleRate <= 0 || sampleRate > AudioProtocolLimits.MaxSampleRate)
+        {
+            throw new MessageTooLargeException(
+                $"Sample rate exceeds protocol limits: sampleRate={sampleRate}."
+            );
+        }
+
+        EnsureBlockDimensions(blockSize, channels);
+
         hello = new HelloOptions(
             sampleRate,
             blockSize,
@@ -52,8 +61,8 @@ public static class AudioProtocolReader
 
     public static bool TryHandleCreditMessage(
         ReadOnlySpan<byte> span,
-        Action<int> addCredits,
-        SemaphoreSlim creditSignal
+        SemaphoreSlim creditSignal,
+        bool enqueueCredits
     )
     {
         if (span.Length != 8 ||
@@ -72,13 +81,22 @@ public static class AudioProtocolReader
             return true;
         }
 
-        int creditsToAdd = blocks > int.MaxValue
-            ? int.MaxValue
-            : (int)blocks;
+        if (blocks > AudioProtocolLimits.MaxOutstandingCredits)
+        {
+            throw new MessageTooLargeException("Audio credit grant exceeds protocol limits.");
+        }
 
-        addCredits(creditsToAdd);
+        if (!enqueueCredits)
+        {
+            return true;
+        }
 
-        for (int i = 0; i < creditsToAdd; i++)
+        if (blocks > AudioProtocolLimits.MaxOutstandingCredits - creditSignal.CurrentCount)
+        {
+            throw new MessageTooLargeException("Outstanding audio credits exceed protocol limits.");
+        }
+
+        for (int i = 0; i < (int)blocks; i++)
         {
             creditSignal.Release();
         }
@@ -160,9 +178,15 @@ public static class AudioProtocolReader
 
         if (uncompressedBytes <= 0 ||
             compressedBytes <= 0 ||
-            span.Length < 28 + compressedBytes)
+            span.Length != 28 + compressedBytes)
         {
             return false;
+        }
+
+        if (uncompressedBytes > AudioProtocolLimits.MaxUncompressedBytes ||
+            compressedBytes > AudioProtocolLimits.MaxCompressedBytes)
+        {
+            throw new MessageTooLargeException("Compressed audio message exceeds protocol limits.");
         }
 
         byte[] uncompressed = new byte[uncompressedBytes];
@@ -188,7 +212,7 @@ public static class AudioProtocolReader
                 totalRead += read;
             }
 
-            if (totalRead != uncompressedBytes)
+            if (totalRead != uncompressedBytes || deflate.ReadByte() != -1)
             {
                 return false;
             }
@@ -232,6 +256,8 @@ public static class AudioProtocolReader
             return false;
         }
 
+        EnsureBlockDimensions(frames, channels);
+
         int samples;
         try
         {
@@ -252,7 +278,7 @@ public static class AudioProtocolReader
             return false;
         }
 
-        if (span.Length < 20 + bytes)
+        if (span.Length != 20 + bytes)
         {
             return false;
         }
@@ -262,9 +288,15 @@ public static class AudioProtocolReader
 
         for (int i = 0; i < samples; ++i)
         {
-            audio[i] = BitConverter.Int32BitsToSingle(
+            float sample = BitConverter.Int32BitsToSingle(
                 BinaryPrimitives.ReadInt32LittleEndian(payload.Slice(i * sizeof(float), sizeof(float)))
             );
+            if (!float.IsFinite(sample))
+            {
+                return false;
+            }
+
+            audio[i] = sample;
         }
 
         inputBlock = new AudioInputBlock(frames, channels, audio);
@@ -301,6 +333,12 @@ public static class AudioProtocolReader
             return false;
         }
 
+        if (blockFrames > AudioProtocolLimits.MaxFramesPerBlock ||
+            cnt > AudioProtocolLimits.MaxEventsPerBlock)
+        {
+            throw new MessageTooLargeException("Plugin event block exceeds protocol limits.");
+        }
+
         int pos = 20;
         const int entrySize = 12;
 
@@ -309,7 +347,7 @@ public static class AudioProtocolReader
             return false;
         }
 
-        if (span.Length < pos + entrySize * (int)cnt)
+        if (span.Length != pos + entrySize * (int)cnt)
         {
             return false;
         }
@@ -325,6 +363,16 @@ public static class AudioProtocolReader
 
             ushort offset = BinaryPrimitives.ReadUInt16LittleEndian(span.Slice(pos + 8, 2));
 
+            if (type is not 1 and not 2 ||
+                pitch > 127 ||
+                !float.IsFinite(velocity) ||
+                velocity is < 0f or > 1f ||
+                offset >= blockFrames)
+            {
+                events = [];
+                return false;
+            }
+
             events.Add(new PluginEventInput(type, pitch, velocity, offset));
         }
 
@@ -335,5 +383,16 @@ public static class AudioProtocolReader
         );
 
         return true;
+    }
+
+    private static void EnsureBlockDimensions(int frames, int channels)
+    {
+        if (frames > AudioProtocolLimits.MaxFramesPerBlock ||
+            channels > AudioProtocolLimits.MaxChannels)
+        {
+            throw new MessageTooLargeException(
+                $"Audio block exceeds limits: frames={frames}, channels={channels}."
+            );
+        }
     }
 }

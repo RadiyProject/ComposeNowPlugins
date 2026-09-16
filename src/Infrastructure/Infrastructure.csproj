@@ -13,8 +13,4 @@
     <ProjectReference Include="..\Domain\Domain.csproj" />
   </ItemGroup>
 
-  <PropertyGroup>
-      <RootNamespace>ComposeNowPlugins</RootNamespace>
-  </PropertyGroup>
-
 </Project>

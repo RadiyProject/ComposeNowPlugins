@@ -1,7 +1,7 @@
 using ComposeNowPlugins.Domain.Models;
 using ComposeNowPlugins.Domain.Models.Ids;
 
-namespace ComposeNowPlugins.Worker.Services.Processing;
+namespace ComposeNowPlugins.Application.Services.Processing;
 
 public interface IPluginEventMerger
 {

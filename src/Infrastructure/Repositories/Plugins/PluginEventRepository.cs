@@ -1,165 +1,171 @@
-using ComposeNowPlugins.Infrastructure.Cache;
+using System.Text.Json;
 using ComposeNowPlugins.Application.Exceptions;
+using ComposeNowPlugins.Application.Repositories.Plugins;
 using ComposeNowPlugins.Domain.Models;
 using ComposeNowPlugins.Domain.Models.Ids;
+using ComposeNowPlugins.Infrastructure.Cache;
+using StackExchange.Redis;
 
 namespace ComposeNowPlugins.Infrastructure.Repositories.Plugins;
 
-public sealed class PluginEventRepository(ICache cache) : IPluginEventRepository
+public sealed class PluginEventRepository(IConnectionMultiplexer redis) : IPluginEventRepository
 {
-    private readonly ICache _cache = cache;
+    private const int MaxStreamLength = 4096;
+    private const int MaxReadCount = MaxStreamLength;
+    private const string PayloadField = "payload";
 
     private static readonly TimeSpan DefaultTtl = TimeSpan.FromMinutes(5);
+    private static readonly TimeSpan ClaimIdleTime = TimeSpan.FromSeconds(20);
+    private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 
-    public async Task AddBlockEventAsync(
+    private const string AddWithExpiryScript = """
+        local id = redis.call('XADD', KEYS[1], 'MAXLEN', '~', ARGV[2], '*', 'payload', ARGV[1])
+        redis.call('PEXPIRE', KEYS[1], ARGV[3])
+        return id
+        """;
+
+    private readonly IDatabase _database = redis.GetDatabase();
+
+    public Task AddBlockEventAsync(
         PluginId pluginId,
+        ulong epoch,
         ulong seq,
         PluginEvent pluginEvent
     )
     {
-        try
-        {
-            await _cache.ListRightPushAsync(
-                CacheKeys.PluginBlockEvents(pluginId, seq),
-                pluginEvent,
-                DefaultTtl
-            );
-        }
-        catch (Exception exception)
-        {
-            throw new RepositoryException(
-                $"Failed to append block event. PluginId={pluginId}, Seq={seq}",
-                exception
-            );
-        }
+        return AddAsync(CacheKeys.PluginBlockEvents(pluginId, epoch, seq), pluginEvent);
     }
 
-    public async Task AddControlEventAsync(
+    public Task AddControlEventAsync(PluginId pluginId, PluginEvent pluginEvent)
+    {
+        return AddAsync(CacheKeys.PluginControlEvents(pluginId), pluginEvent);
+    }
+
+    public Task<IReadOnlyList<PluginEventDelivery>> ReadBlockEventsAsync(
         PluginId pluginId,
-        PluginEvent pluginEvent
+        ulong epoch,
+        ulong seq,
+        string consumerId
     )
     {
-        try
-        {
-            await _cache.ListRightPushAsync(
-                CacheKeys.PluginControlEvents(pluginId),
-                pluginEvent,
-                DefaultTtl
-            );
-        }
-        catch (Exception exception)
-        {
-            throw new RepositoryException(
-                $"Failed to append control event. PluginId={pluginId}",
-                exception
-            );
-        }
+        return ReadAsync(CacheKeys.PluginBlockEvents(pluginId, epoch, seq), consumerId);
     }
 
-    public async Task<IReadOnlyList<PluginEvent>> GetBlockEventsAsync(
+    public Task<IReadOnlyList<PluginEventDelivery>> ReadControlEventsAsync(
         PluginId pluginId,
-        ulong seq
+        string consumerId
     )
+    {
+        return ReadAsync(CacheKeys.PluginControlEvents(pluginId), consumerId);
+    }
+
+    private async Task AddAsync(string streamKey, PluginEvent pluginEvent)
     {
         try
         {
-            return await _cache.ListRangeAsync<PluginEvent>(
-                CacheKeys.PluginBlockEvents(pluginId, seq)
+            string payload = JsonSerializer.Serialize(pluginEvent, JsonOptions);
+            await _database.ScriptEvaluateAsync(
+                AddWithExpiryScript,
+                [(RedisKey)streamKey],
+                [
+                    (RedisValue)payload,
+                    (RedisValue)MaxStreamLength,
+                    (RedisValue)(long)DefaultTtl.TotalMilliseconds
+                ]
             );
         }
         catch (Exception exception)
         {
-            throw new RepositoryException(
-                $"Failed to get block events. PluginId={pluginId}, Seq={seq}",
-                exception
-            );
+            throw new RepositoryException($"Failed to append plugin event. Stream={streamKey}", exception);
         }
     }
 
-    public async Task<IReadOnlyList<PluginEvent>> GetControlEventsAsync(
-        PluginId pluginId
+    private async Task<IReadOnlyList<PluginEventDelivery>> ReadAsync(
+        string streamKey,
+        string consumerId
     )
     {
         try
         {
-            return await _cache.ListRangeAsync<PluginEvent>(
-                CacheKeys.PluginControlEvents(pluginId)
+            await EnsureGroupAsync(streamKey);
+
+            StreamAutoClaimResult claimed = await _database.StreamAutoClaimAsync(
+                streamKey,
+                CacheKeys.PluginEventConsumerGroup,
+                consumerId,
+                (long)ClaimIdleTime.TotalMilliseconds,
+                "0-0",
+                MaxReadCount
+            );
+
+            StreamEntry[] pending = await _database.StreamReadGroupAsync(
+                streamKey,
+                CacheKeys.PluginEventConsumerGroup,
+                consumerId,
+                "0-0",
+                MaxReadCount
+            );
+
+            StreamEntry[] fresh = await _database.StreamReadGroupAsync(
+                streamKey,
+                CacheKeys.PluginEventConsumerGroup,
+                consumerId,
+                ">",
+                MaxReadCount
+            );
+
+            return Deserialize(
+                streamKey,
+                claimed.ClaimedEntries
+                    .Concat(pending)
+                    .Concat(fresh)
+                    .DistinctBy(entry => entry.Id)
             );
         }
         catch (Exception exception)
         {
-            throw new RepositoryException(
-                $"Failed to get control events. PluginId={pluginId}",
-                exception
-            );
+            throw new RepositoryException($"Failed to read plugin event stream. Stream={streamKey}", exception);
         }
     }
 
-    public async Task DeleteBlockEventsAsync(
-        PluginId pluginId,
-        ulong seq
-    )
+    private async Task EnsureGroupAsync(string streamKey)
     {
         try
         {
-            await _cache.RemoveAsync(
-                CacheKeys.PluginBlockEvents(pluginId, seq)
+            await _database.StreamCreateConsumerGroupAsync(
+                streamKey,
+                CacheKeys.PluginEventConsumerGroup,
+                "0-0",
+                createStream: true
             );
         }
-        catch (Exception exception)
+        catch (RedisServerException exception) when (exception.Message.StartsWith("BUSYGROUP", StringComparison.Ordinal))
         {
-            throw new RepositoryException(
-                $"Failed to delete block events. PluginId={pluginId}, Seq={seq}",
-                exception
-            );
         }
     }
 
-    public async Task DeleteControlEventsAsync(
-        PluginId pluginId
+    private static IReadOnlyList<PluginEventDelivery> Deserialize(
+        string streamKey,
+        IEnumerable<StreamEntry> entries
     )
     {
-        try
-        {
-            await _cache.RemoveAsync(
-                CacheKeys.PluginControlEvents(pluginId)
-            );
-        }
-        catch (Exception exception)
-        {
-            throw new RepositoryException(
-                $"Failed to delete control events. PluginId={pluginId}",
-                exception
-            );
-        }
-    }
+        List<PluginEventDelivery> deliveries = [];
 
-    public async Task<IReadOnlyList<PluginEvent>> PopControlEventsAsync(
-        PluginId pluginId
-    )
-    {
-        try
+        foreach (StreamEntry entry in entries.Take(MaxReadCount))
         {
-            string key = CacheKeys.PluginControlEvents(pluginId);
-
-            long count = await _cache.ListLengthAsync(key);
-
-            if (count <= 0)
+            NameValueEntry payload = entry.Values.FirstOrDefault(value => value.Name == PayloadField);
+            if (!payload.Value.HasValue)
             {
-                return [];
+                continue;
             }
 
-            return await _cache.ListLeftPopAsync<PluginEvent>(
-                key,
-                count
-            );
+            PluginEvent? pluginEvent = JsonSerializer.Deserialize<PluginEvent>(payload.Value!, JsonOptions);
+            if (pluginEvent is not null)
+            {
+                deliveries.Add(new PluginEventDelivery(streamKey, entry.Id.ToString(), pluginEvent));
+            }
         }
-        catch (Exception exception)
-        {
-            throw new RepositoryException(
-                $"Failed to pop control events. PluginId={pluginId}",
-                exception
-            );
-        }
+
+        return deliveries;
     }
 }

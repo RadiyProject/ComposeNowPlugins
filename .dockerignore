@@ -1,0 +1,9 @@
+.git
+.env
+
+**/bin/
+**/obj/
+
+_docker/container/
+logs/
+redis/

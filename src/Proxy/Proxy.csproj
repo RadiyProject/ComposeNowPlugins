@@ -2,7 +2,6 @@
 
   <PropertyGroup>
     <AssemblyName>Proxy</AssemblyName>
-    <RootNamespace>ComposeNowPlugins</RootNamespace>
   </PropertyGroup>
 
   <ItemGroup>
@@ -20,9 +19,5 @@
     <ProjectReference Include="..\Application\Application.csproj" />
     <ProjectReference Include="..\Infrastructure\Infrastructure.csproj" />
   </ItemGroup>
-
-  <PropertyGroup>
-      <RootNamespace>ComposeNowPlugins</RootNamespace>
-  </PropertyGroup>
 
 </Project>

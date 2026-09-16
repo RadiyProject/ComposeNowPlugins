@@ -1,12 +1,17 @@
+using ComposeNowPlugins.Domain.Factories;
 using ComposeNowPlugins.Domain.Models.Ids;
 
 namespace ComposeNowPlugins.Proxy.Transports;
 
-public sealed class RuntimeSessionFactory(IServiceProvider serviceProvider,
-    ILogger<RuntimeSessionFactory> logger) : IRuntimeSessionFactory
+public sealed class RuntimeSessionFactory(
+    IServiceProvider serviceProvider,
+    ILogger<RuntimeSessionFactory> logger,
+    PluginFactory pluginFactory
+) : IRuntimeSessionFactory
 {
     private readonly IServiceProvider _serviceProvider = serviceProvider;
     private readonly ILogger<RuntimeSessionFactory> _logger = logger;
+    private readonly PluginFactory _pluginFactory = pluginFactory;
 
     public IRuntimeSession Create(HttpContext context)
     {
@@ -30,9 +35,7 @@ public sealed class RuntimeSessionFactory(IServiceProvider serviceProvider,
         }
 
         string pluginIdValue = context.Request.Query["pluginId"].ToString();
-        PluginId pluginId = string.IsNullOrWhiteSpace(pluginIdValue)
-            ? PluginId.New()
-            : new PluginId(pluginIdValue);
+        PluginId pluginId = _pluginFactory.CreateId(pluginIdValue);
 
         return ActivatorUtilities.CreateInstance<AudioRuntimeSession>(
             _serviceProvider,

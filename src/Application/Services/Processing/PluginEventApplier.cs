@@ -1,13 +1,12 @@
 using ComposeNowPlugins.Domain.Configurations;
 using ComposeNowPlugins.Domain.Models;
-using ComposeNowPlugins.Worker.Wrappers;
 
-namespace ComposeNowPlugins.Worker.Services.Processing;
+namespace ComposeNowPlugins.Application.Services.Processing;
 
 public sealed class PluginEventApplier : IPluginEventApplier
 {
     public void Apply(
-        VstEngine vst,
+        IPluginEngine engine,
         Plugin plugin,
         PluginEvent pluginEvent
     )
@@ -17,7 +16,7 @@ public sealed class PluginEventApplier : IPluginEventApplier
             case PluginEventType.NoteOn:
                 if (pluginEvent.Pitch.HasValue)
                 {
-                    vst.NoteOn(
+                    engine.NoteOn(
                         pluginEvent.Pitch.Value,
                         pluginEvent.Velocity ?? 1f
                     );
@@ -29,7 +28,7 @@ public sealed class PluginEventApplier : IPluginEventApplier
             case PluginEventType.NoteOff:
                 if (pluginEvent.Pitch.HasValue)
                 {
-                    vst.NoteOff(pluginEvent.Pitch.Value);
+                    engine.NoteOff(pluginEvent.Pitch.Value);
 
                     plugin.MarkNoteOff(pluginEvent.Pitch.Value);
                 }
@@ -39,12 +38,12 @@ public sealed class PluginEventApplier : IPluginEventApplier
                 if (pluginEvent.ParameterId.HasValue &&
                     pluginEvent.ParameterValue.HasValue)
                 {
-                    vst.SetParamIfChanged(
+                    engine.SetParameterIfChanged(
                         pluginEvent.ParameterId.Value,
                         pluginEvent.ParameterValue.Value
                     );
 
-                    plugin.SetParameter(
+                    plugin.ChangeParameter(
                         pluginEvent.ParameterId.Value,
                         pluginEvent.ParameterValue.Value
                     );
@@ -54,7 +53,7 @@ public sealed class PluginEventApplier : IPluginEventApplier
             case PluginEventType.Panic:
                 for (int note = 0; note < 128; note++)
                 {
-                    vst.NoteOff(note);
+                    engine.NoteOff(note);
                 }
 
                 plugin.Panic();

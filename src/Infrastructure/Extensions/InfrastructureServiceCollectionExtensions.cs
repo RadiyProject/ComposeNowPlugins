@@ -10,7 +10,6 @@ public static class InfrastructureServiceCollectionExtensions
         services.AddPluginCatalog(configuration);
         services.AddRepositories();
         services.AddRedisCache();
-        services.AddPluginClusterServices();
 
         return services;
     }

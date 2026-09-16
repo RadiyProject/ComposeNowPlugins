@@ -8,6 +8,16 @@ public sealed class RedisPluginLeaseValidator(
     IPluginNodeState nodeState
 ) : IPluginLeaseValidator
 {
+    private const int MaxLeaseIdLength = 256;
+    private const string ConsumeLeaseScript = """
+        local value = redis.call('GET', KEYS[1])
+        if not value or value ~= ARGV[1] then
+            return 0
+        end
+
+        return redis.call('DEL', KEYS[1])
+        """;
+
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase
@@ -30,7 +40,7 @@ public sealed class RedisPluginLeaseValidator(
             return true;
         }
 
-        if (string.IsNullOrWhiteSpace(leaseId))
+        if (string.IsNullOrWhiteSpace(leaseId) || leaseId.Length > MaxLeaseIdLength)
         {
             return false;
         }
@@ -41,22 +51,36 @@ public sealed class RedisPluginLeaseValidator(
             return false;
         }
 
-        PluginNodeLease? lease = JsonSerializer.Deserialize<PluginNodeLease>(
-            value!,
-            JsonOptions
-        );
+        PluginNodeLease? lease;
+        try
+        {
+            lease = JsonSerializer.Deserialize<PluginNodeLease>(
+                value!,
+                JsonOptions
+            );
+        }
+        catch (JsonException)
+        {
+            return false;
+        }
 
         bool valid = lease is not null
             && lease.NodeId == _nodeState.NodeId
             && string.Equals(lease.PluginName, pluginName, StringComparison.OrdinalIgnoreCase)
             && lease.ExpiresAt > DateTimeOffset.UtcNow;
 
-        if (valid)
+        if (!valid)
         {
-            await _database.KeyDeleteAsync(PluginBrokerKeys.Lease(leaseId));
+            return false;
         }
 
-        return valid;
+        RedisResult consumed = await _database.ScriptEvaluateAsync(
+            ConsumeLeaseScript,
+            [(RedisKey)PluginBrokerKeys.Lease(leaseId)],
+            [(RedisValue)value]
+        );
+
+        return (long)consumed == 1;
     }
 
     private static bool ReadRequireLease()

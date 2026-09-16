@@ -1,8 +1,5 @@
-using System.Collections.Concurrent;
-using System.Diagnostics;
 using System.Text;
 using ComposeNowPlugins.Domain.Configurations;
-using ComposeNowPlugins.Application.Exceptions;
 using ComposeNowPlugins.Domain.Models;
 using ComposeNowPlugins.Domain.Models.Ids;
 using ComposeNowPlugins.Application.Repositories.Plugins;
@@ -15,35 +12,40 @@ public sealed class AudioRuntimeSession(
     PluginId pluginId,
     string pluginName,
     ILogger<AudioRuntimeSession> log,
-    IPluginCatalog pluginCatalog,
     IPluginRepository pluginRepository,
-    IPluginEventRepository pluginEventRepository,
-    IPluginBlockProcessor pluginBlockProcessor
+    IPluginSessionService pluginSessionService,
+    IPluginEventService pluginEventService,
+    IAudioSessionCoordinator audioSessionCoordinator
 ) : IRuntimeSession
 {
     private readonly PluginId _pluginId = pluginId;
     private readonly string _pluginName = pluginName;
     private readonly ILogger<AudioRuntimeSession> _log = log;
-    private readonly IPluginCatalog _pluginCatalog = pluginCatalog;
     private readonly IPluginRepository _pluginRepository = pluginRepository;
-    private readonly IPluginEventRepository _pluginEventRepository = pluginEventRepository;
-    private readonly IPluginBlockProcessor _pluginBlockProcessor = pluginBlockProcessor;
+    private readonly IPluginSessionService _pluginSessionService = pluginSessionService;
+    private readonly IPluginEventService _pluginEventService = pluginEventService;
+    private readonly IAudioSessionCoordinator _audioSessionCoordinator = audioSessionCoordinator;
 
     private const int DefaultSampleRate = 44100;
     private const int DefaultBlockSize = 512;
     private const int DefaultChannels = 2;
     private const string DefaultMode = "realtime";
 
-    private const int RenderInitialPrefillBlocks = 0;
-
     private readonly PluginCacheLeaseRenewer _pluginCacheLeaseRenewer = new(pluginId, pluginRepository, log);
-    private readonly PluginEventCommandHandler _pluginEventCommandHandler = new(pluginId, pluginEventRepository);
-    private readonly AudioOutputWriter _audioOutputWriter = new();
-
+    private readonly PluginEventCommandHandler _pluginEventCommandHandler = new(
+        pluginId,
+        pluginEventService
+    );
     private long _lastProcessedSeq = -1;
     private volatile bool _offlineMode;
-    private readonly ConcurrentDictionary<ulong, int> _offlineBlockFrames = new();
-    private readonly ConcurrentDictionary<ulong, AudioInputBlock> _inputBlocks = new();
+    private readonly SequencedBuffer<int> _offlineBlockFrames = new(
+        AudioProtocolLimits.MaxBufferedBlocks,
+        AudioProtocolLimits.MaxFutureSequenceDistance
+    );
+    private readonly SequencedBuffer<AudioInputBlock> _inputBlocks = new(
+        AudioProtocolLimits.MaxBufferedBlocks,
+        AudioProtocolLimits.MaxFutureSequenceDistance
+    );
 
     private TaskCompletionSource<ulong>? _renderReadyTcs;
     private ulong _currentEpoch;
@@ -56,7 +58,11 @@ public sealed class AudioRuntimeSession(
         using var sessionCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         CancellationToken sessionCt = sessionCts.Token;
 
-        Plugin plugin = await EnsurePluginExistsAsync();
+        Plugin plugin = await _pluginSessionService.GetOrCreateAsync(
+            _pluginId,
+            _pluginName
+        );
+        _currentEpoch = CreateEpoch();
 
         await ch.SendAsync(
             Encoding.UTF8.GetBytes($"plugin id {_pluginId.GetValue()}"),
@@ -74,29 +80,21 @@ public sealed class AudioRuntimeSession(
             TaskCreationOptions.RunContinuationsAsynchronously
         );
 
-        int credits = 0;
-        using var creditSignal = new SemaphoreSlim(0, int.MaxValue);
+        using var creditSignal = new SemaphoreSlim(
+            0,
+            AudioProtocolLimits.MaxOutstandingCredits
+        );
 
-        Task reader = Task.Run(
-            async () =>
-            {
-                await ReadInputLoopAsync(
-                    ch,
-                    helloTcs,
-                    creditSignal,
-                    blocks => Interlocked.Add(ref credits, blocks),
-                    sessionCt
-                );
-            },
+        Task reader = ReadInputLoopAsync(
+            ch,
+            helloTcs,
+            creditSignal,
             sessionCt
         );
 
-        Task pluginCacheLease = Task.Run(
-            () => _pluginCacheLeaseRenewer.RunAsync(
-                ch,
-                sessionCts
-            ),
-            sessionCt
+        Task pluginCacheLease = _pluginCacheLeaseRenewer.RunAsync(
+            ch,
+            sessionCts
         );
 
         try
@@ -144,32 +142,50 @@ public sealed class AudioRuntimeSession(
 
             _offlineMode = offline;
             Volatile.Write(ref _lastProcessedSeq, -1);
-            _offlineBlockFrames.Clear();
-            _inputBlocks.Clear();
 
-            plugin.SetAudioConfiguration(
-                sampleRate,
-                blockSize,
-                channels
-            );
+            plugin.SampleRate = sampleRate;
+            plugin.BlockSize = blockSize;
+            plugin.Channels = channels;
 
             await _pluginRepository.UpdateAsync(
                 _pluginId,
                 plugin
             );
 
-            await RunProcessingLoopAsync(
+            Task processingLoop = RunProcessingLoopAsync(
                 ch,
                 sampleRate,
                 blockSize,
                 channels,
                 offline,
                 plugin.Descriptor.Type == PluginType.EFFECT,
-                () => Volatile.Read(ref credits),
-                () => Interlocked.Decrement(ref credits),
                 creditSignal,
                 sessionCt
             );
+
+            Task completed = await Task.WhenAny(reader, processingLoop);
+            if (completed == reader)
+            {
+                await sessionCts.CancelAsync();
+                try
+                {
+                    await reader;
+                }
+                finally
+                {
+                    try
+                    {
+                        await processingLoop;
+                    }
+                    catch (OperationCanceledException) when (sessionCt.IsCancellationRequested)
+                    {
+                    }
+                }
+
+                return;
+            }
+
+            await processingLoop;
         }
         finally
         {
@@ -181,7 +197,7 @@ public sealed class AudioRuntimeSession(
             }
             catch (OperationCanceledException)
             {
-                // Нормальное завершение при закрытии соединения.
+                // Normal completion when the connection closes.
             }
             catch (System.Net.WebSockets.WebSocketException exception)
             {
@@ -206,7 +222,7 @@ public sealed class AudioRuntimeSession(
             }
             catch (OperationCanceledException)
             {
-                // Нормальное завершение при закрытии соединения.
+                // Normal completion when the connection closes.
             }
             catch (Exception exception)
             {
@@ -242,58 +258,10 @@ public sealed class AudioRuntimeSession(
         }
     }
 
-    private async Task<Plugin> EnsurePluginExistsAsync()
-    {
-        Plugin? existing = await _pluginRepository.GetAsync(_pluginId);
-
-        if (existing is not null)
-        {
-            return existing;
-        }
-
-        var descriptor = _pluginCatalog.GetRequired(_pluginName)
-            ?? throw new InvalidOperationException(
-                $"Plugin '{_pluginName}' is not registered or disabled."
-            );
-
-        Plugin plugin = new(
-            _pluginId,
-            descriptor
-        );
-
-        try
-        {
-            await _pluginRepository.AddAsync(plugin);
-
-            _log.LogDebug(
-                "Plugin state created. PluginId={PluginId}, PluginName={PluginName}",
-                _pluginId,
-                _pluginName
-            );
-
-            return plugin;
-        }
-        catch (EntityAlreadyExistsException)
-        {
-        }
-
-        Plugin? createdByAnotherRequest = await _pluginRepository.GetAsync(_pluginId);
-
-        if (createdByAnotherRequest is not null)
-        {
-            return createdByAnotherRequest;
-        }
-
-        throw new InvalidOperationException(
-            $"Failed to create plugin state. PluginId={_pluginId}, PluginName={_pluginName}"
-        );
-    }
-
     private async Task ReadInputLoopAsync(
         IRuntimeChannel ch,
         TaskCompletionSource<HelloOptions> helloTcs,
         SemaphoreSlim creditSignal,
-        Action<int> addCredits,
         CancellationToken ct
     )
     {
@@ -304,6 +272,13 @@ public sealed class AudioRuntimeSession(
 
             if (msg.ContentType == "text/plain")
             {
+                if (payload.Length > AudioProtocolLimits.MaxTextMessageBytes)
+                {
+                    throw new MessageTooLargeException(
+                        $"Text message exceeds {AudioProtocolLimits.MaxTextMessageBytes} bytes."
+                    );
+                }
+
                 string text = AudioProtocolReader.ReadText(span);
 
                 await HandleTextMessageAsync(
@@ -317,8 +292,8 @@ public sealed class AudioRuntimeSession(
 
             if (AudioProtocolReader.TryHandleCreditMessage(
                 span,
-                addCredits,
-                creditSignal
+                creditSignal,
+                _offlineMode
             ))
             {
                 continue;
@@ -347,7 +322,8 @@ public sealed class AudioRuntimeSession(
                 out AudioInputBlock? inputBlock
             ) && inputBlock is not null)
             {
-                if ((long)audioSeq <= Volatile.Read(ref _lastProcessedSeq))
+                long lastProcessedSequence = Volatile.Read(ref _lastProcessedSeq);
+                if (lastProcessedSequence >= 0 && audioSeq <= (ulong)lastProcessedSequence)
                 {
                     _log.LogDebug(
                         "Late AIN1 input block dropped. PluginId={PluginId}, InputSeq={InputSeq}, LastProcessedSeq={LastProcessedSeq}",
@@ -358,11 +334,20 @@ public sealed class AudioRuntimeSession(
                     continue;
                 }
 
-                _inputBlocks[audioSeq] = inputBlock;
+                if (!_inputBlocks.TryAdd(
+                    audioSeq,
+                    inputBlock,
+                    Volatile.Read(ref _lastProcessedSeq)
+                ))
+                {
+                    throw new MessageTooLargeException(
+                        $"Audio input sequence buffer limit exceeded. Seq={audioSeq}."
+                    );
+                }
 
                 if (_offlineMode)
                 {
-                    _offlineBlockFrames[audioSeq] = inputBlock.Frames;
+                    AddOfflineBlockFrames(audioSeq, inputBlock.Frames);
                 }
 
                 continue;
@@ -386,46 +371,51 @@ public sealed class AudioRuntimeSession(
         long lastProcessedSeq = Volatile.Read(ref _lastProcessedSeq);
         bool isLate = lastProcessedSeq >= 0 && seq <= (ulong)lastProcessedSeq;
 
+        if (!isLate && IsTooFarInFuture(seq, lastProcessedSeq))
+        {
+            throw new MessageTooLargeException(
+                $"Plugin event sequence exceeds the future window. Seq={seq}."
+            );
+        }
+
         if (offline && !isLate)
         {
-            _offlineBlockFrames[seq] = blockFrames;
+            AddOfflineBlockFrames(seq, blockFrames);
         }
 
         foreach (PluginEventInput item in events)
         {
-            PluginEvent pluginEvent = item.Type == 2
-                ? PluginEvent.NoteOff(
-                    _pluginId,
-                    item.Pitch,
-                    seq,
-                    item.Offset,
-                    blockFrames
-                )
-                : PluginEvent.NoteOn(
-                    _pluginId,
+            PluginEventDispatchResult dispatchResult = await _pluginEventService.DispatchBlockNoteAsync(
+                _pluginId,
+                _currentEpoch,
+                seq,
+                blockFrames,
+                new PluginNoteEventCommand(
                     item.Pitch,
                     item.Velocity,
-                    seq,
                     item.Offset,
-                    blockFrames
+                    IsNoteOff: item.Type == 2
+                ),
+                isLate,
+                offline
+            );
+
+            if (dispatchResult == PluginEventDispatchResult.Dropped)
+            {
+                _log.LogWarning(
+                    "Late offline EVT1 event dropped. PluginId={PluginId}, EventSeq={EventSeq}, LastProcessedSeq={LastProcessedSeq}, Type={Type}, Pitch={Pitch}",
+                    _pluginId.GetValue(),
+                    seq,
+                    lastProcessedSeq,
+                    item.Type,
+                    item.Pitch
                 );
 
-            if (isLate)
+                continue;
+            }
+
+            if (dispatchResult == PluginEventDispatchResult.ControlQueue)
             {
-                if (offline)
-                {
-                    _log.LogWarning(
-                        "Late offline EVT1 event dropped. PluginId={PluginId}, EventSeq={EventSeq}, LastProcessedSeq={LastProcessedSeq}, Type={Type}, Pitch={Pitch}",
-                        _pluginId.GetValue(),
-                        seq,
-                        lastProcessedSeq,
-                        item.Type,
-                        item.Pitch
-                    );
-
-                    continue;
-                }
-
                 _log.LogWarning(
                     "Late realtime EVT1 event. Applying as control event. PluginId={PluginId}, EventSeq={EventSeq}, LastProcessedSeq={LastProcessedSeq}, Type={Type}, Pitch={Pitch}",
                     _pluginId.GetValue(),
@@ -434,20 +424,7 @@ public sealed class AudioRuntimeSession(
                     item.Type,
                     item.Pitch
                 );
-
-                await _pluginEventRepository.AddControlEventAsync(
-                    _pluginId,
-                    pluginEvent
-                );
-
-                continue;
             }
-
-            await _pluginEventRepository.AddBlockEventAsync(
-                _pluginId,
-                seq,
-                pluginEvent
-            );
         }
     }
 
@@ -477,6 +454,15 @@ public sealed class AudioRuntimeSession(
             out HelloOptions? hello
         ))
         {
+            if (hello is not null)
+            {
+                _offlineMode = string.Equals(
+                    hello.Mode,
+                    "offline",
+                    StringComparison.OrdinalIgnoreCase
+                );
+            }
+
             helloTcs.TrySetResult(hello!);
             return;
         }
@@ -500,8 +486,6 @@ public sealed class AudioRuntimeSession(
         int channels,
         bool offline,
         bool waitForInputAudio,
-        Func<int> getCredits,
-        Action decrementCredits,
         SemaphoreSlim creditSignal,
         CancellationToken ct
     )
@@ -510,229 +494,40 @@ public sealed class AudioRuntimeSession(
         blockSize = NormalizePositive(blockSize, DefaultBlockSize);
         channels = NormalizePositive(channels, DefaultChannels);
 
-        TimeSpan period = TimeSpan.FromSeconds(
-            (double)blockSize / sampleRate
-        );
-
-        long next = Stopwatch.GetTimestamp();
-        double freq = Stopwatch.Frequency;
-
-        ulong seq = 0;
-        ulong ts = 0;
-
-        _currentEpoch = CreateEpoch();
-
         _renderReadyTcs = new TaskCompletionSource<ulong>(
             TaskCreationOptions.RunContinuationsAsynchronously
         );
 
-        string beginMessage = offline
-            ? $"render begin {_currentEpoch} 0 {RenderInitialPrefillBlocks}"
-            : $"realtime begin {_currentEpoch} 0";
-
-        await ch.SendAsync(
-            Encoding.UTF8.GetBytes(beginMessage),
-            "text/plain",
-            true,
-            ct
-        );
-
-        _log.LogDebug(
-            "Audio session begin sent. PluginId={PluginId}, Epoch={Epoch}, Mode={Mode}, SampleRate={SampleRate}, BlockSize={BlockSize}, Channels={Channels}",
-            _pluginId.GetValue(),
+        var configuration = new AudioSessionConfiguration(
+            _pluginId,
             _currentEpoch,
-            offline ? "offline" : "realtime",
             sampleRate,
             blockSize,
-            channels
+            channels,
+            offline,
+            waitForInputAudio
+        );
+        var port = new ProxyAudioSessionPort(
+            _pluginId,
+            configuration,
+            ch,
+            new AudioOutputWriter(),
+            _offlineBlockFrames,
+            _inputBlocks,
+            _renderReadyTcs,
+            creditSignal,
+            sequence => Volatile.Write(
+                ref _lastProcessedSeq,
+                unchecked((long)sequence)
+            ),
+            _log
         );
 
-        TimeSpan readyTimeout = offline
-            ? TimeSpan.FromSeconds(2)
-            : TimeSpan.FromMilliseconds(100);
-
-        bool readyConfirmed = false;
-        try
-        {
-            await _renderReadyTcs.Task.WaitAsync(
-                readyTimeout,
-                ct
-            );
-
-            readyConfirmed = true;
-        }
-        catch (TimeoutException)
-        {
-            readyConfirmed = false;
-        }
-
-        if (readyConfirmed)
-        {
-            _log.LogDebug(
-                "Audio session ready confirmed. PluginId={PluginId}, Epoch={Epoch}, Mode={Mode}",
-                _pluginId.GetValue(),
-                _currentEpoch,
-                offline ? "offline" : "realtime"
-            );
-        }
-        else if (offline)
-        {
-            _log.LogWarning(
-                "Offline audio session ready confirmation timeout. Continuing may produce broken render. PluginId={PluginId}, Epoch={Epoch}",
-                _pluginId.GetValue(),
-                _currentEpoch
-            );
-        }
-        else
-        {
-            _log.LogDebug(
-                "Realtime ready confirmation timeout. Continuing. PluginId={PluginId}, Epoch={Epoch}",
-                _pluginId.GetValue(),
-                _currentEpoch
-            );
-        }
-
-        ulong epoch = _currentEpoch;
-
-        while (!ct.IsCancellationRequested)
-        {
-            if (offline)
-            {
-                while (getCredits() <= 0)
-                {
-                    await creditSignal.WaitAsync(ct);
-                }
-            }
-
-            int framesForBlock = blockSize;
-
-            if (offline &&
-                !_offlineBlockFrames.TryRemove(seq, out framesForBlock))
-            {
-                framesForBlock = blockSize;
-
-                _log.LogWarning(
-                    "Offline block size marker was not found. Falling back to configured block size. PluginId={PluginId}, Seq={Seq}, BlockSize={BlockSize}",
-                    _pluginId.GetValue(),
-                    seq,
-                    blockSize
-                );
-            }
-
-            framesForBlock = NormalizePositive(framesForBlock, blockSize);
-
-            AudioInputBlock? inputBlock = null;
-            if (waitForInputAudio)
-            {
-                long inputDeadline = offline
-                    ? Stopwatch.GetTimestamp() + (long)(TimeSpan.FromSeconds(10).TotalSeconds * Stopwatch.Frequency)
-                    : Stopwatch.GetTimestamp() + (long)(TimeSpan.FromMilliseconds(250).TotalSeconds * Stopwatch.Frequency);
-
-                while (!_inputBlocks.TryRemove(seq, out inputBlock))
-                {
-                    if (Stopwatch.GetTimestamp() >= inputDeadline)
-                    {
-                        break;
-                    }
-
-                    await Task.Delay(1, ct);
-                }
-
-                if (inputBlock is null && !offline)
-                {
-                    _log.LogDebug(
-                        "Realtime AIN1 input block timeout. Processing silence to keep effect stream alive. PluginId={PluginId}, Seq={Seq}, BlockSize={BlockSize}, Channels={Channels}",
-                        _pluginId.GetValue(),
-                        seq,
-                        blockSize,
-                        channels
-                    );
-                }
-            }
-            else
-            {
-                _inputBlocks.TryRemove(seq, out inputBlock);
-            }
-
-            if (inputBlock is not null)
-            {
-                framesForBlock = NormalizePositive(inputBlock.Frames, framesForBlock);
-            }
-
-            PluginBlockProcessResult result = await _pluginBlockProcessor.ProcessBlockAsync(
-                _pluginId,
-                seq,
-                framesForBlock,
-                offline,
-                inputBlock is not null
-                    ? new ReadOnlyMemory<float>(inputBlock.Audio)
-                    : null,
-                ct
-            );
-
-            try
-            {
-                Volatile.Write(ref _lastProcessedSeq, (long)seq);
-
-                if (result.ShouldSend)
-                {
-                    await _audioOutputWriter.WriteAsync(
-                        ch,
-                        epoch,
-                        seq,
-                        ts,
-                        sampleRate,
-                        channels,
-                        framesForBlock,
-                        result.Audio,
-                        ct
-                    );
-                }
-            }
-            finally
-            {
-                result.Dispose();
-            }
-
-            if (offline)
-            {
-                decrementCredits();
-            }
-
-            seq++;
-            ts += (ulong)framesForBlock;
-
-            if (!offline && !waitForInputAudio)
-            {
-                long now = Stopwatch.GetTimestamp();
-                long periodTicks = (long)(period.TotalSeconds * freq);
-
-                next += periodTicks;
-
-                long lagTicks = now - next;
-
-                if (lagTicks > periodTicks * 2)
-                {
-                    next = now + periodTicks;
-
-                    _log.LogDebug(
-                        "Realtime processing lag corrected. PluginId={PluginId}, Seq={Seq}, LagMs={LagMs:F2}",
-                        _pluginId.GetValue(),
-                        seq,
-                        lagTicks * 1000.0 / freq
-                    );
-                }
-
-                TimeSpan delay = TimeSpan.FromSeconds(
-                    (next - Stopwatch.GetTimestamp()) / freq
-                );
-
-                if (delay > TimeSpan.Zero)
-                {
-                    await Task.Delay(delay, ct);
-                }
-            }
-        }
+        await _audioSessionCoordinator.RunAsync(
+            configuration,
+            port,
+            ct
+        );
     }
 
     private static int NormalizePositive(
@@ -743,6 +538,20 @@ public sealed class AudioRuntimeSession(
         return value > 0 ? value : fallback;
     }
 
+    private void AddOfflineBlockFrames(ulong sequence, int frames)
+    {
+        if (!_offlineBlockFrames.TryAdd(
+            sequence,
+            frames,
+            Volatile.Read(ref _lastProcessedSeq)
+        ))
+        {
+            throw new MessageTooLargeException(
+                $"Offline frame marker buffer limit exceeded. Seq={sequence}."
+            );
+        }
+    }
+
     private static ulong CreateEpoch()
     {
         long value = Random.Shared.NextInt64(
@@ -751,6 +560,19 @@ public sealed class AudioRuntimeSession(
         );
 
         return unchecked((ulong)value);
+    }
+
+    private static bool IsTooFarInFuture(ulong sequence, long lastProcessedSequence)
+    {
+        ulong baseline = lastProcessedSequence < 0
+            ? 0
+            : (ulong)lastProcessedSequence;
+        ulong maxDistance = AudioProtocolLimits.MaxFutureSequenceDistance;
+        ulong maxAllowed = ulong.MaxValue - baseline < maxDistance
+            ? ulong.MaxValue
+            : baseline + maxDistance;
+
+        return sequence > maxAllowed;
     }
 
     private bool TryHandleAudioReady(string text)

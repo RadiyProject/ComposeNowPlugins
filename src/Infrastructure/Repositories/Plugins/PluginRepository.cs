@@ -1,7 +1,8 @@
-using ComposeNowPlugins.Infrastructure.Cache;
 using ComposeNowPlugins.Application.Exceptions;
+using ComposeNowPlugins.Application.Repositories.Plugins;
 using ComposeNowPlugins.Domain.Models;
 using ComposeNowPlugins.Domain.Models.Ids;
+using ComposeNowPlugins.Infrastructure.Cache;
 
 namespace ComposeNowPlugins.Infrastructure.Repositories.Plugins;
 
@@ -31,22 +32,20 @@ public class PluginRepository(ICache cache) : IPluginRepository
         try
         {
             string cacheKey = CacheKeys.PluginState(model.Id);
-            bool exists = await _cache.ExistsAsync(cacheKey);
+            bool added = await _cache.SetIfNotExistsAsync(
+                cacheKey,
+                model,
+                DefaultTtl
+            );
 
-            if (exists)
+            if (!added)
             {
                 throw new EntityAlreadyExistsException(
                     $"Plugin state already exists. PluginId={model.Id}"
                 );
             }
-
-            await _cache.SetAsync(
-                cacheKey,
-                model,
-                DefaultTtl
-            );
         }
-        catch (RepositoryException)
+        catch (EntityAlreadyExistsException)
         {
             throw;
         }
@@ -95,7 +94,7 @@ public class PluginRepository(ICache cache) : IPluginRepository
                 );
             }
         }
-        catch (RepositoryException)
+        catch (EntityNotFoundException)
         {
             throw;
         }

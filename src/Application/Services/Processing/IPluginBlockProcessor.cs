@@ -6,6 +6,7 @@ public interface IPluginBlockProcessor
 {
     public Task<PluginBlockProcessResult> ProcessBlockAsync(
         PluginId pluginId,
+        ulong epoch,
         ulong seq,
         int frames,
         bool offline,

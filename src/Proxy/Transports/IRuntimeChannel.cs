@@ -2,12 +2,12 @@ namespace ComposeNowPlugins.Proxy.Transports;
 
 public interface IRuntimeChannel
 {
-    // читать все входящие сообщения до закрытия
+    // Read incoming messages until the channel closes.
     IAsyncEnumerable<IncomingMessage> ReadAllAsync(CancellationToken cancellationToken);
 
-    // отправить ответ (контент-тип опционально)
+    // Send a response with an optional content type.
     ValueTask SendAsync(ReadOnlyMemory<byte> payload, string? contentType, bool endOfMessage, CancellationToken cancellationToken);
 
-    // метаданные канала (peer, протокол и пр.) — по вкусу
+    // Channel metadata, such as the peer and protocol.
     string Transport { get; } // "websocket", "grpc" ...
 }

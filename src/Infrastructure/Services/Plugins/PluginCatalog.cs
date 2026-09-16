@@ -1,4 +1,5 @@
 using Microsoft.Extensions.Options;
+using ComposeNowPlugins.Application.Services.Plugins;
 using ComposeNowPlugins.Domain.Configurations;
 
 namespace ComposeNowPlugins.Infrastructure.Services.Plugins;

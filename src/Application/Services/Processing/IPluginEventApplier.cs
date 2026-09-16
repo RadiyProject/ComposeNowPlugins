@@ -1,12 +1,12 @@
 using ComposeNowPlugins.Domain.Models;
-using ComposeNowPlugins.Worker.Wrappers;
+using ComposeNowPlugins.Application.Services.Processing;
 
-namespace ComposeNowPlugins.Worker.Services.Processing;
+namespace ComposeNowPlugins.Application.Services.Processing;
 
 public interface IPluginEventApplier
 {
     public void Apply(
-        VstEngine vst,
+        IPluginEngine engine,
         Plugin plugin,
         PluginEvent pluginEvent
     );

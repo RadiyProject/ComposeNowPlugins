@@ -4,28 +4,25 @@ namespace ComposeNowPlugins.Infrastructure.Cache;
 
 public static class CacheKeys
 {
-    public static string RuntimeSession(string sessionId)
-    {
-        return $"runtime-session:{sessionId}";
-    }
-
     public static string PluginState(PluginId pluginId)
     {
-        return $"plugin-state:{pluginId.GetValue()}";
+        return $"plugin:{{{pluginId.GetValue()}}}:state";
     }
 
-    public static string PluginBlockEvents(PluginId pluginId, ulong seq)
+    public static string PluginBlockEvents(PluginId pluginId, ulong epoch, ulong seq)
     {
-        return $"plugin-events:{pluginId.GetValue()}:block:{seq}";
+        return $"plugin:{{{pluginId.GetValue()}}}:events:{epoch}:block:{seq}";
     }
 
     public static string PluginControlEvents(PluginId pluginId)
     {
-        return $"plugin-events:{pluginId.GetValue()}:control";
+        return $"plugin:{{{pluginId.GetValue()}}}:events:control";
     }
 
-    public static string PluginEngineLock(string pluginName)
+    public static string PluginBlockResult(PluginId pluginId, ulong epoch, ulong seq)
     {
-        return $"plugin-engine-lock:{pluginName}";
+        return $"plugin:{{{pluginId.GetValue()}}}:result:{epoch}:{seq}";
     }
+
+    public const string PluginEventConsumerGroup = "plugin-processors";
 }

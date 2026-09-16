@@ -1,22 +1,30 @@
 using ComposeNowPlugins.Domain.Configurations;
+using ComposeNowPlugins.Application.Services.Processing;
 
 namespace ComposeNowPlugins.Worker.Wrappers;
 
-public sealed class VstEngine : IAsyncDisposable
+public sealed class VstEngine : IPluginEngine, IAsyncDisposable
 {
     private readonly ILogger? _log;
-    private readonly IntPtr _host;
+    private IntPtr _host;
     private int _sampleRate;
     private int _blockSize;
     private int _channels = 2;
     private float[] _tmp;
     private float[] _inputTmp;
     private readonly Dictionary<uint, float> _appliedParameters = new();
+    private readonly int _maxStateBytes;
     private ulong _knownStateHash;
     private int _knownStateLength = -1;
 
-    public VstEngine(string pluginPath, ILogger<VstEngine> log, int sampleRate = 44100,
-        int blockSize = 512, int channels = 2)
+    public VstEngine(
+        string pluginPath,
+        ILogger<VstEngine> log,
+        int sampleRate = 44100,
+        int blockSize = 512,
+        int channels = 2,
+        int maxStateBytes = 64 * 1024 * 1024
+    )
     {
         _log = log;
         if (string.IsNullOrWhiteSpace(pluginPath))
@@ -28,23 +36,44 @@ public sealed class VstEngine : IAsyncDisposable
             throw new FileNotFoundException($"VST plugin was not found: {pluginPath}");
         }
 
-        _sampleRate = Math.Max(1, sampleRate);
-        _blockSize = Math.Max(1, blockSize);
-        _channels = Math.Max(1, channels);
+        ValidateConfiguration(sampleRate, blockSize, channels);
+        _sampleRate = sampleRate;
+        _blockSize = blockSize;
+        _channels = channels;
+        _maxStateBytes = maxStateBytes > 0
+            ? maxStateBytes
+            : throw new ArgumentOutOfRangeException(nameof(maxStateBytes));
 
-        _host = VstNative.VstCreate(pluginPath, _sampleRate, _blockSize, _channels);
-        if (_host == IntPtr.Zero)
+        int initialBufferSize = checked(_blockSize * _channels);
+        _tmp = new float[initialBufferSize];
+        _inputTmp = new float[initialBufferSize];
+
+        IntPtr host = VstNative.VstCreate(pluginPath, _sampleRate, _blockSize, _channels);
+        if (host == IntPtr.Zero)
         {
             throw new InvalidOperationException($"vst_create failed for plugin: {pluginPath}");
         }
 
-        var devDelayMs = 0;
-        var latencySamples = (uint)(_sampleRate * (devDelayMs / 1000.0));
-        VstNative.VstSetLatency(_host, latencySamples);
+        try
+        {
+            var devDelayMs = 0;
+            var latencySamples = (uint)(_sampleRate * (devDelayMs / 1000.0));
+            VstNative.VstSetLatency(host, latencySamples);
+            _host = host;
+        }
+        catch
+        {
+            try
+            {
+                VstNative.VstDestroy(host);
+            }
+            catch
+            {
+                // Preserve the initialization failure.
+            }
 
-        int initialBufferSize = _blockSize * _channels;
-        _tmp = new float[initialBufferSize];
-        _inputTmp = new float[initialBufferSize];
+            throw;
+        }
 
         _log?.LogDebug(
             "VstEngine ready: {Path} @ {SR} Hz, block {Block}, ch {Ch}",
@@ -59,12 +88,19 @@ public sealed class VstEngine : IAsyncDisposable
     public int BlockSize => _blockSize;
     public int Channels   => _channels;
 
-    public void NoteOn(int note, float vel = 1f) => VstNative.VstNoteOn(_host, note, vel);
-    public void NoteOff(int note) => VstNative.VstNoteOff(_host, note);
+    public void NoteOn(int note, float vel = 1f)
+    {
+        VstNative.VstNoteOn(GetHost(), note, vel);
+    }
+
+    public void NoteOff(int note)
+    {
+        VstNative.VstNoteOff(GetHost(), note);
+    }
 
     public void SetParam(uint id, float norm)
     {
-        VstNative.VstSetParam(_host, id, norm);
+        VstNative.VstSetParam(GetHost(), id, norm);
         _appliedParameters[id] = norm;
     }
 
@@ -78,7 +114,12 @@ public sealed class VstEngine : IAsyncDisposable
         SetParam(id, norm);
     }
 
-    // генерируем следующий аудио-чанк (interleaved float32)
+    public void SetParameterIfChanged(uint id, float value)
+    {
+        SetParamIfChanged(id, value);
+    }
+
+    // Generate the next audio chunk (interleaved float32).
     public ReadOnlyMemory<float> Process()
     {
         return Process(_blockSize);
@@ -88,8 +129,8 @@ public sealed class VstEngine : IAsyncDisposable
     {
         if (frames <= 0) return ReadOnlyMemory<float>.Empty;
 
-        // гарантируем буфер нужного размера
-        int need = frames * _channels;
+        // Ensure the buffer has the required size.
+        int need = checked(frames * _channels);
         if (_tmp.Length < need)
             _tmp = new float[need];
 
@@ -98,20 +139,20 @@ public sealed class VstEngine : IAsyncDisposable
         {
             fixed (float* outPtr = _tmp)
             {
-                n = VstNative.VstProcess(_host, outPtr, frames);
+                n = VstNative.VstProcess(GetHost(), outPtr, frames);
             }
         }
 
-        // VstProcess возвращает фактически отрисованные фреймы (<= frames)
+        EnsureProcessedFrameCount(n, frames);
         return new ReadOnlyMemory<float>(_tmp, 0, n * _channels);
     }
 
-    // обработка эффекта: interleaved float32 input -> interleaved float32 output
+    // Effect processing: interleaved float32 input -> interleaved float32 output
     public ReadOnlyMemory<float> Process(ReadOnlySpan<float> input, int frames)
     {
         if (frames <= 0) return ReadOnlyMemory<float>.Empty;
 
-        int need = frames * _channels;
+        int need = checked(frames * _channels);
         if (_tmp.Length < need)
             _tmp = new float[need];
         if (_inputTmp.Length < need)
@@ -128,35 +169,49 @@ public sealed class VstEngine : IAsyncDisposable
             fixed (float* inPtr = _inputTmp)
             fixed (float* outPtr = _tmp)
             {
-                n = VstNative.VstProcessReplacing(_host, inPtr, outPtr, frames);
+                n = VstNative.VstProcessReplacing(GetHost(), inPtr, outPtr, frames);
             }
         }
 
+        EnsureProcessedFrameCount(n, frames);
         return new ReadOnlyMemory<float>(_tmp, 0, n * _channels);
     }
 
     public ValueTask DisposeAsync()
     {
-        if (_host != IntPtr.Zero) VstNative.VstDestroy(_host);
+        DestroyHost();
+        GC.SuppressFinalize(this);
+
         return ValueTask.CompletedTask;
     }
 
-    public bool Reconfigure(int? sampleRate, int? blockSize, int? channels, bool offline)
+    ~VstEngine()
     {
-        var sr = Math.Max(1, sampleRate ?? _sampleRate);
-        var bs = Math.Max(1, blockSize  ?? _blockSize);
-        var ch = Math.Max(1, channels ?? _channels);
+        try
+        {
+            DestroyHost();
+        }
+        catch
+        {
+            // Finalizers must not propagate native cleanup failures.
+        }
+    }
 
-        var ok = VstNative.VstReconfigure(_host, sr, bs, ch, offline ? 1 : 0);
+    public bool Reconfigure(int sampleRate, int blockSize, int channels, bool offline)
+    {
+        ValidateConfiguration(sampleRate, blockSize, channels);
+
+        var ok = VstNative.VstReconfigure(GetHost(), sampleRate, blockSize, channels, offline ? 1 : 0);
         if (!ok) return false;
 
-        _sampleRate = sr;
-        _blockSize  = bs;
-        _channels   = ch;
-        if (_tmp.Length != _blockSize * _channels)
-            _tmp = new float[_blockSize * _channels];
-        if (_inputTmp.Length != _blockSize * _channels)
-            _inputTmp = new float[_blockSize * _channels];
+        _sampleRate = sampleRate;
+        _blockSize = blockSize;
+        _channels = channels;
+        int bufferSize = checked(_blockSize * _channels);
+        if (_tmp.Length != bufferSize)
+            _tmp = new float[bufferSize];
+        if (_inputTmp.Length != bufferSize)
+            _inputTmp = new float[bufferSize];
         _appliedParameters.Clear();
 
         _log?.LogDebug("VstEngine reconfigured: {SR} Hz, block {Block}, ch {Ch}, offline={Offline}",
@@ -165,7 +220,7 @@ public sealed class VstEngine : IAsyncDisposable
     }
 
     /// <summary>
-    /// Снять текущий бинарный снапшот состояния VST (component+controller state).
+    /// Capture the current binary VST snapshot (component and controller state).
     /// </summary>
     public unsafe byte[] GetState()
     {
@@ -173,7 +228,7 @@ public sealed class VstEngine : IAsyncDisposable
 
         uint size = 0;
 
-        // 1) Первый вызов — узнать размер
+        // 1) Query the size.
         if (!VstNative.VstGetState(_host, IntPtr.Zero, ref size))
         {
             throw new InvalidOperationException("VstGetState (size query) failed.");
@@ -185,9 +240,16 @@ public sealed class VstEngine : IAsyncDisposable
             return [];
         }
 
+        if (size > _maxStateBytes)
+        {
+            throw new InvalidOperationException(
+                $"VST state exceeds the configured limit. Size={size}, Limit={_maxStateBytes}."
+            );
+        }
+
         var buf = new byte[size];
 
-        // 2) Второй вызов — реально забрать стейт
+        // 2) Retrieve the state.
         fixed (byte* p = buf)
         {
             var ptr = (IntPtr)p;
@@ -195,8 +257,13 @@ public sealed class VstEngine : IAsyncDisposable
                 throw new InvalidOperationException("VstGetState (data) failed.");
         }
 
-        // size может быть меньше, чем первоначальная оценка, на всякий случай подрежем
-        if (size != buf.Length)
+        // The actual size may be smaller than the initial estimate; trim the buffer.
+        if (size > buf.Length)
+        {
+            throw new InvalidOperationException("VST returned a state larger than the provided buffer.");
+        }
+
+        if (size < buf.Length)
         {
             Array.Resize(ref buf, checked((int)size));
         }
@@ -206,13 +273,15 @@ public sealed class VstEngine : IAsyncDisposable
     }
 
     /// <summary>
-    /// Восстановить бинарный снапшот состояния VST.
+    /// Restore a binary VST state snapshot.
     /// </summary>
     public void SetState(byte[]? state)
     {
         ObjectDisposedException.ThrowIf(_host == IntPtr.Zero, nameof(VstEngine));
 
         state ??= [];
+
+        EnsureStateSize(state);
 
         if (!VstNative.VstSetState(_host, state, (uint)state.Length))
         {
@@ -228,6 +297,7 @@ public sealed class VstEngine : IAsyncDisposable
         ObjectDisposedException.ThrowIf(_host == IntPtr.Zero, nameof(VstEngine));
 
         state ??= [];
+        EnsureStateSize(state);
         ulong hash = ComputeStateHash(state);
 
         if (_knownStateLength == state.Length && _knownStateHash == hash)
@@ -250,7 +320,7 @@ public sealed class VstEngine : IAsyncDisposable
     {
         get
         {
-            int mode = VstNative.VstGetProcessMode(_host);
+            int mode = VstNative.VstGetProcessMode(GetHost());
 
             return mode == 1
                 ? PluginProcessingMode.Offline
@@ -262,6 +332,60 @@ public sealed class VstEngine : IAsyncDisposable
     {
         _knownStateLength = state.Length;
         _knownStateHash = ComputeStateHash(state);
+    }
+
+    private IntPtr GetHost()
+    {
+        IntPtr host = _host;
+        ObjectDisposedException.ThrowIf(host == IntPtr.Zero, this);
+        return host;
+    }
+
+    private void DestroyHost()
+    {
+        IntPtr host = Interlocked.Exchange(ref _host, IntPtr.Zero);
+        if (host != IntPtr.Zero)
+        {
+            VstNative.VstDestroy(host);
+        }
+    }
+
+    private static void EnsureProcessedFrameCount(int processedFrames, int requestedFrames)
+    {
+        if (processedFrames < 0 || processedFrames > requestedFrames)
+        {
+            throw new InvalidOperationException(
+                $"VST returned an invalid frame count. Requested={requestedFrames}, Processed={processedFrames}."
+            );
+        }
+    }
+
+    private void EnsureStateSize(byte[] state)
+    {
+        if (state.Length > _maxStateBytes)
+        {
+            throw new InvalidOperationException(
+                $"VST state exceeds the configured limit. Size={state.Length}, Limit={_maxStateBytes}."
+            );
+        }
+    }
+
+    private static void ValidateConfiguration(int sampleRate, int blockSize, int channels)
+    {
+        if (sampleRate is <= 0 or > AudioProcessingLimits.MaxSampleRate)
+        {
+            throw new ArgumentOutOfRangeException(nameof(sampleRate));
+        }
+
+        if (blockSize is <= 0 or > AudioProcessingLimits.MaxFramesPerBlock)
+        {
+            throw new ArgumentOutOfRangeException(nameof(blockSize));
+        }
+
+        if (channels is <= 0 or > AudioProcessingLimits.MaxChannels)
+        {
+            throw new ArgumentOutOfRangeException(nameof(channels));
+        }
     }
 
     private static ulong ComputeStateHash(ReadOnlySpan<byte> state)

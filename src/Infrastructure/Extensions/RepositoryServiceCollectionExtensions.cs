@@ -11,6 +11,7 @@ public static class RepositoryServiceCollectionExtensions
     {
         services.AddScoped<IPluginRepository, PluginRepository>();
         services.AddScoped<IPluginEventRepository, PluginEventRepository>();
+        services.AddScoped<IPluginProcessingCheckpointRepository, PluginProcessingCheckpointRepository>();
 
         return services;
     }

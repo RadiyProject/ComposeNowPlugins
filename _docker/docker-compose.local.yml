@@ -22,7 +22,7 @@ services:
       DOTNET_WATCH_SUPPRESS_LAUNCH_BROWSER: ${DOTNET_WATCH_SUPPRESS_LAUNCH_BROWSER}
       ASPNETCORE_ENVIRONMENT: ${APP_MODE}
       DOTNET_WATCH_RESTART_ON_RUDE_EDIT: "true"
-      PluginWorker__Address: http://plugin-worker:5002
+      CONTAINER_ARTIFACTS_ROOT: /tmp/dotnet-artifacts
     expose:
       - 5001
     working_dir: /workspace
@@ -32,6 +32,8 @@ services:
       - ../logs:/logs
 
   plugin-worker:
+    deploy:
+      replicas: ${PLUGIN_WORKER_REPLICAS:-1}
     build:
       context: ..
       dockerfile: _docker/Dockerfile/Worker.dockerfile
@@ -50,6 +52,7 @@ services:
       DOTNET_WATCH_SUPPRESS_LAUNCH_BROWSER: ${DOTNET_WATCH_SUPPRESS_LAUNCH_BROWSER}
       ASPNETCORE_ENVIRONMENT: ${APP_MODE}
       DOTNET_WATCH_RESTART_ON_RUDE_EDIT: "true"
+      CONTAINER_ARTIFACTS_ROOT: /tmp/dotnet-artifacts
     expose:
       - 5002
     working_dir: /workspace

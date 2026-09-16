@@ -21,9 +21,28 @@ public class WebSocketChannel(WebSocket ws) : IRuntimeChannel
                 WebSocketReceiveResult result;
                 do
                 {
-                    result = await _ws.ReceiveAsync(new ArraySegment<byte>(buf), cancellationToken);
+                    WebSocketReceiveResult? received = await ReceiveAsync(
+                        new ArraySegment<byte>(buf),
+                        cancellationToken
+                    );
+                    if (received is null)
+                    {
+                        yield break;
+                    }
+
+                    result = received;
                     if (result.MessageType == WebSocketMessageType.Close) yield break;
-                    if (result.Count > 0) ms.Write(buf, 0, result.Count);
+                    if (result.Count > 0)
+                    {
+                        if (ms.Length + result.Count > AudioProtocolLimits.MaxWebSocketMessageBytes)
+                        {
+                            throw new MessageTooLargeException(
+                                $"WebSocket message exceeds {AudioProtocolLimits.MaxWebSocketMessageBytes} bytes."
+                            );
+                        }
+
+                        ms.Write(buf, 0, result.Count);
+                    }
                 } while (!result.EndOfMessage);
 
                 string mt = result.MessageType == WebSocketMessageType.Text
@@ -35,6 +54,23 @@ public class WebSocketChannel(WebSocket ws) : IRuntimeChannel
         finally
         {
             ArrayPool<byte>.Shared.Return(buf);
+        }
+    }
+
+    private async Task<WebSocketReceiveResult?> ReceiveAsync(
+        ArraySegment<byte> buffer,
+        CancellationToken cancellationToken
+    )
+    {
+        try
+        {
+            return await _ws.ReceiveAsync(buffer, cancellationToken);
+        }
+        catch (WebSocketException exception) when (
+            exception.WebSocketErrorCode == WebSocketError.ConnectionClosedPrematurely
+        )
+        {
+            return null;
         }
     }
 

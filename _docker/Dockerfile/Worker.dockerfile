@@ -14,6 +14,7 @@ CMD ["dotnet", "--info"]
 FROM base AS publish
 
 WORKDIR /workspace
+COPY Directory.Build.props NuGet.Config ./
 COPY src/ ./src/
 
 RUN dotnet restore src/Worker/Worker.csproj

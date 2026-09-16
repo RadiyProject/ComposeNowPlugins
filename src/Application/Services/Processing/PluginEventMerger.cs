@@ -2,7 +2,7 @@ using ComposeNowPlugins.Domain.Configurations;
 using ComposeNowPlugins.Domain.Models;
 using ComposeNowPlugins.Domain.Models.Ids;
 
-namespace ComposeNowPlugins.Worker.Services.Processing;
+namespace ComposeNowPlugins.Application.Services.Processing;
 
 public sealed class PluginEventMerger : IPluginEventMerger
 {
@@ -51,7 +51,7 @@ public sealed class PluginEventMerger : IPluginEventMerger
         for (int i = 0; i < source.Count; i++)
         {
             PluginEvent pluginEvent = source[i];
-            if (pluginEvent.PluginId.GetValue() == pluginId.GetValue())
+            if (pluginEvent.PluginId == pluginId)
             {
                 target.Add((pluginEvent, target.Count));
             }

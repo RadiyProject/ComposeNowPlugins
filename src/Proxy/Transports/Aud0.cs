@@ -7,7 +7,7 @@ public static class Aud0
 {
     public static byte[] Pack(ulong seq, ulong ts, int sampleRate, int channels, ReadOnlyMemory<float> interleaved)
     {
-        // предполагаем, что длина кратна channels
+        // Assume the length is a multiple of channels.
         int samples = interleaved.Length; 
         int frames = samples / channels;
 

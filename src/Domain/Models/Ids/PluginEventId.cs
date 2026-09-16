@@ -9,7 +9,7 @@ public class PluginEventId : Id<string>
     {
         if (string.IsNullOrWhiteSpace(id))
         {
-            throw new ArgumentException("Plugin id cannot be empty.", nameof(id));
+            throw new ArgumentException("Plugin event id cannot be empty.", nameof(id));
         }
     }
 

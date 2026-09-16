@@ -1,6 +1,6 @@
 namespace ComposeNowPlugins.Application.Exceptions;
 
-public sealed class EntityNotFoundException : RepositoryException
+public sealed class EntityNotFoundException : AppException
 {
     public EntityNotFoundException(string message)
         : base(message)

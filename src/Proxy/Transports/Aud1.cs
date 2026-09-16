@@ -122,16 +122,26 @@ public static class Aud1
             interleaved
         );
 
-        RentedFrame? compressed = TryCompress(
-            raw.Memory.Span.Slice(HeaderSize),
-            epoch,
-            seq,
-            ts,
-            sampleRate,
-            channels,
-            interleaved.Length / channels,
-            out int compressedCandidateLength
-        );
+        RentedFrame? compressed;
+        int compressedCandidateLength;
+        try
+        {
+            compressed = TryCompress(
+                raw.Memory.Span.Slice(HeaderSize),
+                epoch,
+                seq,
+                ts,
+                sampleRate,
+                channels,
+                interleaved.Length / channels,
+                out compressedCandidateLength
+            );
+        }
+        catch
+        {
+            raw.Dispose();
+            throw;
+        }
 
         if (compressed is null)
         {
@@ -161,16 +171,26 @@ public static class Aud1
             frames
         );
 
-        RentedFrame? compressed = TryCompress(
-            raw.Memory.Span.Slice(HeaderSize),
-            epoch,
-            seq,
-            ts,
-            sampleRate,
-            channels,
-            frames,
-            out int compressedCandidateLength
-        );
+        RentedFrame? compressed;
+        int compressedCandidateLength;
+        try
+        {
+            compressed = TryCompress(
+                raw.Memory.Span.Slice(HeaderSize),
+                epoch,
+                seq,
+                ts,
+                sampleRate,
+                channels,
+                frames,
+                out compressedCandidateLength
+            );
+        }
+        catch
+        {
+            raw.Dispose();
+            throw;
+        }
 
         if (compressed is null)
         {
@@ -282,7 +302,9 @@ public static class Aud1
         BinaryPrimitives.WriteInt32LittleEndian(header.Slice(40), raw.Length);
         BinaryPrimitives.WriteInt32LittleEndian(header.Slice(44), compressedBytes);
 
-        compressedStream.ToArray().AsSpan(0, compressedBytes).CopyTo(buf.AsSpan(48, compressedBytes));
+        compressedStream.GetBuffer()
+            .AsSpan(0, compressedBytes)
+            .CopyTo(buf.AsSpan(48, compressedBytes));
 
         return new RentedFrame(
             buf,

@@ -18,12 +18,12 @@ internal static partial class VstNative
         if (!string.Equals(libraryName, libBase, StringComparison.Ordinal))
             return IntPtr.Zero;
 
-        // 1) Берём базу из ENV/конфига (например: /plugins/VstHostCapi/lib/Release)
+        // 1) Read the base directory from the environment/configuration (for example: /plugins/VstHostCapi/lib/Release)
         var baseDir = "/plugins/" + (
             Environment.GetEnvironmentVariable("VST_HOST_LIB_DIR")
             ?? "VstHostCapi") + "/lib/Release";
 
-        // 2) Подбираем имя под ОС
+        // 2) Select the library name for the OS.
         var fileName = $"lib{libBase}.so";
 
         var fullPath = Path.Combine(baseDir, fileName);
@@ -91,8 +91,8 @@ internal static partial class VstNative
     [return: MarshalAs(UnmanagedType.I1)]
     public static partial bool VstGetState(
         IntPtr h,
-        IntPtr buffer,          // может быть IntPtr.Zero
-        ref uint size);         // in/out: размер буфера / фактический размер
+        IntPtr buffer,          // may be IntPtr.Zero
+        ref uint size);         // in/out: buffer size / actual size
 
     // bool VstSetState(VstHandle* h, const void* buffer, uint32_t size);
     [LibraryImport(libBase)]

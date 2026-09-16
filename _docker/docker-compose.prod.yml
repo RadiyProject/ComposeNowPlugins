@@ -19,13 +19,14 @@ services:
       - ../.env
     environment:
       ASPNETCORE_ENVIRONMENT: Production
-      PluginWorker__Address: http://plugin-worker:5002
     expose:
       - 5001
     volumes:
       - ../logs:/logs
 
   plugin-worker:
+    deploy:
+      replicas: ${PLUGIN_WORKER_REPLICAS:-2}
     build:
       context: ..
       dockerfile: _docker/Dockerfile/Worker.dockerfile
